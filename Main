@@ -1,0 +1,212 @@
+import tkinter as tk
+from tkinter import ttk
+from tkinter import messagebox
+import webbrowser
+import pandas as pd
+import paramiko
+import cv2
+from pyzbar.pyzbar import decode
+import pyperclip
+
+# Define colors and font
+dominant_color = '#B6C0D0'
+accent_color = '#7fe1f5'
+standard_font = ('Arial', 18)
+# Read and process the CSV file
+try:
+    df = pd.read_csv("Device Directory.csv")
+    df_sorted = df.sort_values(
+        by
+        ='Device Name')
+    tms_names = df_sorted['Device Name'].dropna().tolist()
+except FileNotFoundError:
+    print("Error: 'Device Directory.csv' not found. Please provide the correct file path.")
+    exit(1)
+
+class AutocompleteCombobox(ttk.Combobox):
+    def set_completion_list(self, completion_list):
+        self._completion_list = sorted(completion_list, key=str.lower)
+        self.bind('<KeyRelease>', self.handle_keyrelease)
+
+    def reset_completion_list(self):
+        """Reset the completion list to the original list."""
+        self['values'] = self._completion_list
+
+    def handle_keyrelease(self, event):
+        if event.keysym == "BackSpace":
+            self.delete(self.index(tk.INSERT), tk.END)
+        else:
+            value = event.widget.get()
+            if value == '':
+                data = self._completion_list
+            else:
+                data = [item for item in self._completion_list if value.lower() in item.lower()]
+            self['values'] = data
+            if event.keysym == "Escape":  # Let's use the Escape key for resetting
+                self.reset_completion_list()
+
+
+# Define functions
+def read_qr_code(file_path):
+    # Read the image
+    image = cv2.imread(file_path)
+    # Decode the QR code
+    decoded_objects = decode(image)
+    for obj in decoded_objects:
+        # Return the data decoded from the QR code
+        return obj.data.decode()
+    return None
+
+
+def display_qr_code_data():
+    # Replace 'path_to_image' with the path to your QR code image
+    userid = username_box.get()
+    path_to_image = f"C:/Users/{userid}/Downloads/ScreenShot.png"
+    # Read the QR code
+    url = read_qr_code(path_to_image)
+    # Check the URL and display the last 6 characters of the url
+    if url:
+        registration_code = url[-6:]
+        messagebox.showinfo("QR Code Data", f"The registration code is: {registration_code}")
+    else:
+        messagebox.showerror("QR Code Data", "No QR code found in the image.")
+    update_status(registration_code)
+    pyperclip.copy(registration_code)
+
+
+def update_status(message):
+    status_label.config(text=message)
+
+
+def on_entry_click(event, entry, default_text):
+    """Function to be called when an entry box is clicked."""
+    if entry.get() == default_text:
+        entry.delete(0, "end")  # Delete all the text in the entry
+        entry.insert(0, '')  # Insert blank for user input
+        entry.config(fg='black')
+
+
+def on_focusout(event, entry, default_text):
+    """Function to be called when an entry box loses focus."""
+    if entry.get() == '':
+        entry.insert(0, default_text)
+        entry.config(fg='grey')
+
+
+def take_screenshot():
+    # User input
+    hostname = chat_box.get()  # Get the IP address or hostname from the entry box
+    userid = username_box.get()  # Get the username from the new entry box
+    if hostname == 'Enter Device IP: ' or userid == 'Enter Username: ':
+        update_status("Please enter the device IP and your username.")
+        return
+    # File paths
+    remote_file_paths = ['/logs/ScreenShot.bmp', '/logs/ScreenShot.png']
+    local_file_path_template = f'C:/Users/{userid}/Downloads/ScreenShot.' + '{}'
+    # Initialize the SSH client
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # Connect to the source device
+    try:
+        ssh_client.connect(hostname=hostname, username='admin', password='Blackr0ck')
+        update_status(f"Connected to {hostname}")
+        # Send the screenshot command
+        stdin, stdout, stderr = ssh_client.exec_command('screenshot')
+        update_status(stdout.read().decode())
+        # Try to download the available file
+        for remote_file_path in remote_file_paths:
+            file_extension = remote_file_path.split('.')[-1]
+            local_file_path = local_file_path_template.format(file_extension)
+            try:
+                sftp = ssh_client.open_sftp()
+                sftp.get(remote_file_path, local_file_path)
+                update_status(f"File downloaded to {local_file_path}")
+                sftp.close()
+                break  # Exit the loop if file is found and downloaded
+            except FileNotFoundError:
+                update_status(f"No file found at {remote_file_path}")
+        update_status("Connection closed")
+    except Exception as e:
+        update_status(f"An error occurred: {e}")
+    finally:
+        ssh_client.close()
+        chat_box.delete(0, tk.END)  # Clear the chat box after the operation
+        update_status("Screenshot Downloaded")
+
+
+def display_vc_details(tms_name):
+    vc_details = df[df['Device Name'] == tms_name].iloc[0] if tms_name in df['Device Name'].values else {}
+    for label, key in zip(detail_labels, ['Device Name', 'Device IP', 'Location', 'Device Group', 'MAC Address']):
+        label.config(text=f"{key}: {vc_details.get(key, '')}")
+
+
+def open_vc(tms_name):
+    vc_details = df[df['Device Name'] == tms_name].iloc[0] if tms_name in df['Device Name'].values else {}
+    if 'Device Id' in vc_details:
+        webbrowser.open(
+            f"https://blackrock.cloud.appspace.com/console/#!/devices/details/overview?id={vc_details['Device Id']}")
+
+
+def execute_ssh_command(ip_address, command, success_message):
+    try:
+        with paramiko.SSHClient() as client:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(ip_address, username='admin', password='Blackr0ck')
+            stdin, stdout, stderr = client.exec_command(command)
+            print(stdout.read().decode())
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        update_status(success_message)
+
+
+# Setup main window
+root = tk.Tk()
+root.title("AppSpace Devices v 1.1")
+root.geometry("1000x700")
+root.configure(bg=dominant_color)
+# Create main page
+main_page = tk.Frame(root, bg=dominant_color)
+main_page.pack(fill='both', expand=True)
+for i in range(3):
+    main_page.columnconfigure(i, weight=1)
+# Create widgets
+dropdown_tms_names = AutocompleteCombobox(main_page, values=tms_names, font=standard_font)
+dropdown_tms_names.set_completion_list(tms_names)
+dropdown_tms_names.grid(row=0, column=1, pady=20, sticky='ew')
+button_show_details = tk.Button(main_page, text="Details",
+                                command=lambda: display_vc_details(dropdown_tms_names.get()), font=standard_font,
+                                bg=accent_color)
+button_show_details.grid(row=0, column=2, sticky=tk.W + tk.E)
+button_open_vc = tk.Button(main_page, text="Appspace", command=lambda: open_vc(dropdown_tms_names.get()),
+                           font=standard_font, bg=accent_color)
+button_open_vc.grid(row=0, column=0, sticky=tk.W + tk.E)
+detail_labels = [tk.Label(main_page, font=standard_font) for _ in range(5)]
+for i, label in enumerate(detail_labels, start=1):
+    label.grid(row=i, column=1, pady=5, sticky='ew')
+chat_box = tk.Entry(main_page, font=standard_font, fg='grey')
+chat_box.insert(0, 'Enter Device IP: ')
+chat_box.bind('<FocusIn>', lambda event: on_entry_click(event, chat_box, 'Enter Device IP: '))
+chat_box.bind('<FocusOut>', lambda event: on_focusout(event, chat_box, 'Enter Device IP: '))
+chat_box.grid(row=8, column=1, pady=5, sticky='ew')
+username_box = tk.Entry(main_page, font=standard_font, fg='grey')
+username_box.insert(0, 'Enter Username: ')
+username_box.bind('<FocusIn>', lambda event: on_entry_click(event, username_box, 'Enter Username: '))
+username_box.bind('<FocusOut>', lambda event: on_focusout(event, username_box, 'Enter Username: '))
+username_box.grid(row=7, column=1, pady=5, sticky='ew')
+status_label = tk.Label(main_page, text="", font=standard_font)
+status_label.grid(row=9, column=1, pady=5, sticky='ew')
+label_item_count = tk.Label(main_page, text=f"Total Devices: {len(tms_names)}", font=standard_font)
+label_item_count.grid(row=10, column=1, pady=20, sticky='ew')
+# Buttons for SSH commands
+send_button = tk.Button(main_page, text="Reboot", font=standard_font, bg=accent_color,
+                        command=lambda: execute_ssh_command(chat_box.get(), 'reboot', "Reboot command sent."))
+send_button.grid(row=8, column=2, pady=5, sticky='ew')
+screenshot_button = tk.Button(main_page, text="Screenshot", font=standard_font, bg=accent_color,
+                              command=take_screenshot)
+screenshot_button.grid(row=8, column=0, pady=5, sticky='ew')
+qr_code_button = tk.Button(main_page, text="Registration Code", font=standard_font, bg=accent_color,
+                           command=display_qr_code_data)
+qr_code_button.grid(row=7, column=0, pady=5, sticky='ew')
+root.mainloop()
+
