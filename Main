@@ -108,7 +108,7 @@ def take_screenshot():
     ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     # Connect to the source device
     try:
-        ssh_client.connect(hostname=hostname, username='admin', password='Blackr0ck')
+        ssh_client.connect(hostname=hostname, username='admin', password='Password')
         update_status(f"Connected to {hostname}")
         # Send the screenshot command
         stdin, stdout, stderr = ssh_client.exec_command('screenshot')
@@ -151,7 +151,7 @@ def execute_ssh_command(ip_address, command, success_message):
     try:
         with paramiko.SSHClient() as client:
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(ip_address, username='admin', password='Blackr0ck')
+            client.connect(ip_address, username='admin', password='Password')
             stdin, stdout, stderr = client.exec_command(command)
             print(stdout.read().decode())
     except Exception as e:
