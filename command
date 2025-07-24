@@ -177,16 +177,13 @@ class AppSpaceDeviceManager:
                     self.config.set('PATHS', 'csv_file', file_path)
                     with open('config.ini', 'w') as f:
                         self.config.write(f)
-                    else:
-                self.update_status("No screenshot file found on device", self.error_color)
-                
-        except Exception as e:
+                except Exception as e:
                     logger.error(f"Error loading CSV: {e}")
                     messagebox.showerror("Error", f"Failed to load CSV: {e}")
                     self.tms_names = []
             else:
                 self.tms_names = []
-                
+
     def setup_main_window(self):
         """Initialize the main window"""
         self.root = tk.Tk()
