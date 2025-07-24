@@ -84,24 +84,21 @@ class AppSpaceDeviceManager:
                 filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
             )
             
-            if file_path:
-                try:
-                    self.df = pd.read_csv(file_path)
-                    self.df_sorted = self.df.sort_values(by='Device Name', na_position='last')
-                    self.tms_names = self.df_sorted['Device Name'].dropna().tolist()
-                    # Update config with new path
-                    self.config.set('PATHS', 'csv_file', file_path)
-                    with open('config.ini', 'w') as f:
-                        self.config.write(f)
-                    else:
-                self.update_status("No screenshot file found on device", self.error_color)
-                
-        except Exception as e:
-                    logger.error(f"Error loading CSV: {e}")
-                    messagebox.showerror("Error", f"Failed to load CSV: {e}")
-                    self.tms_names = []
-            else:
-                self.tms_names = []
+if file_path:
+    try:
+        self.df = pd.read_csv(file_path)
+        self.df_sorted = self.df.sort_values(by='Device Name', na_position='last')
+        self.tms_names = self.df_sorted['Device Name'].dropna().tolist()
+        # Update config with new path
+        self.config.set('PATHS', 'csv_file', file_path)
+        with open('config.ini', 'w') as f:
+            self.config.write(f)
+    except Exception as e:
+        logger.error(f"Error loading CSV: {e}")
+        messagebox.showerror("Error", f"Failed to load CSV: {e}")
+        self.tms_names = []
+else:
+    self.tms_names = []
                 
     def setup_main_window(self):
         """Initialize the main window"""
