@@ -113,8 +113,9 @@ class AppSpaceDeviceManager:
 
         # Left panel for controls
         self.left_panel = tk.Frame(self.main_container, bg=self.dominant_color, width=700)
-        self.left_panel.pack(side='left', fill='both', expand=False, padx=(0, 10))
+        self.left_panel.pack(side='left', fill='both', expand=True, padx=(0, 10))
         self.left_panel.pack_propagate(False)
+        self.left_panel.rowconfigure(3, weight=1) # Allow notebook to expand
 
         # Right panel for screenshot display
         self.right_panel = tk.Frame(self.main_container, bg=self.dominant_color)
@@ -159,15 +160,11 @@ class AppSpaceDeviceManager:
         device_frame.grid(row=0, column=0, columnspan=3, pady=10, sticky='ew', padx=5)
         device_frame.columnconfigure(1, weight=1)
 
-        # Autocomplete dropdown
         self.dropdown_tms_names = AutocompleteCombobox(device_frame, values=self.tms_names, font=self.standard_font)
         self.dropdown_tms_names.set_completion_list(self.tms_names)
         self.dropdown_tms_names.grid(row=0, column=1, pady=10, padx=5, sticky='ew')
-
-        # Device action buttons
         self.button_open_appspace = tk.Button(device_frame, text="Open Appspace", command=self.open_appspace_threaded, font=self.standard_font, bg=self.accent_color)
         self.button_open_appspace.grid(row=0, column=0, padx=5, sticky='ew')
-
         self.button_show_details = tk.Button(device_frame, text="Show Details", command=self.display_device_details, font=self.standard_font, bg=self.accent_color)
         self.button_show_details.grid(row=0, column=2, padx=5, sticky='ew')
 
@@ -175,7 +172,6 @@ class AppSpaceDeviceManager:
         details_frame = tk.LabelFrame(self.left_panel, text="Device Details", font=self.standard_font, bg=self.dominant_color, fg='black')
         details_frame.grid(row=1, column=0, columnspan=3, pady=10, sticky='ew', padx=5)
         details_frame.columnconfigure(0, weight=1)
-
         self.detail_labels = []
         detail_keys = ['Device Name', 'Device IP', 'Location', 'Device Group', 'MAC Address']
         for i, key in enumerate(detail_keys):
@@ -183,57 +179,63 @@ class AppSpaceDeviceManager:
             label.grid(row=i, column=0, pady=2, sticky='ew', padx=10)
             self.detail_labels.append(label)
 
-        # --- Connection section ---
+        # --- Connection section (always visible) ---
         connection_frame = tk.LabelFrame(self.left_panel, text="Device Connection", font=self.standard_font, bg=self.dominant_color, fg='black')
         connection_frame.grid(row=2, column=0, columnspan=3, pady=10, sticky='ew', padx=5)
         connection_frame.columnconfigure(1, weight=1)
-
-        # Username entry
         tk.Label(connection_frame, text="Username:", font=self.standard_font, bg=self.dominant_color).grid(row=0, column=0, pady=5, sticky='w', padx=5)
         self.username_var = tk.StringVar(value=os.getenv('USERNAME', ''))
         self.username_box = tk.Entry(connection_frame, font=self.standard_font, textvariable=self.username_var)
         self.username_box.grid(row=0, column=1, pady=5, sticky='ew', padx=5)
-
-        # Device IP entry
         tk.Label(connection_frame, text="Device IP:", font=self.standard_font, bg=self.dominant_color).grid(row=1, column=0, pady=5, sticky='w', padx=5)
         self.chat_box = tk.Entry(connection_frame, font=self.standard_font)
         self.chat_box.grid(row=1, column=1, pady=5, sticky='ew', padx=5)
 
-        # --- Action buttons section ---
-        actions_frame = tk.LabelFrame(self.left_panel, text="Device Actions", font=self.standard_font, bg=self.dominant_color, fg='black')
-        actions_frame.grid(row=3, column=0, columnspan=3, pady=10, sticky='ew', padx=5)
-        for i in range(3):
-            actions_frame.columnconfigure(i, weight=1)
-
-        # Dropdown for command selection
-        self.ssh_commands = ["vkenable off", "snmp on", "timezone 10"]
-        self.command_selection_box = ttk.Combobox(actions_frame, 
-                                                  values=self.ssh_commands,
-                                                  font=self.standard_font, 
-                                                  state="readonly")
-        self.command_selection_box.grid(row=0, column=0, pady=5, padx=5, sticky='ew')
-        self.command_selection_box.set("Select a command") # Set placeholder text
-
-        # Button to run the selected command
-        self.run_command_button = tk.Button(actions_frame, text="Run Command",
-                                            font=self.standard_font, bg=self.accent_color,
-                                            command=self.display_command_code_data_threaded)
-        self.run_command_button.grid(row=0, column=1, pady=5, padx=5, sticky='ew')
+        # --- Tabbed actions section ---
+        notebook = ttk.Notebook(self.left_panel)
+        notebook.grid(row=3, column=0, columnspan=3, pady=10, padx=5, sticky='nsew')
         
-        self.screenshot_button = tk.Button(actions_frame, text="Take Screenshot", font=self.standard_font, bg=self.accent_color, command=self.take_screenshot_threaded)
-        self.screenshot_button.grid(row=1, column=0, pady=5, padx=5, sticky='ew')
+        # -- Tab 1: Actions --
+        actions_tab = tk.Frame(notebook, bg=self.dominant_color)
+        notebook.add(actions_tab, text='Actions')
+        actions_tab.columnconfigure(0, weight=1)
+        actions_tab.columnconfigure(1, weight=1)
+        
+        self.screenshot_button = tk.Button(actions_tab, text="Take Screenshot", font=self.standard_font, bg=self.accent_color, command=self.take_screenshot_threaded)
+        self.screenshot_button.grid(row=0, column=0, pady=10, padx=5, sticky='ew')
+        self.reboot_button = tk.Button(actions_tab, text="Reboot Device", font=self.standard_font, bg=self.error_color, command=self.reboot_device_threaded)
+        self.reboot_button.grid(row=0, column=1, pady=10, padx=5, sticky='ew')
 
-        self.reboot_button = tk.Button(actions_frame, text="Reboot Device", font=self.standard_font, bg=self.error_color, command=self.reboot_device_threaded)
-        self.reboot_button.grid(row=1, column=1, pady=5, padx=5, sticky='ew')
+        # -- Tab 2: Commands --
+        commands_tab = tk.Frame(notebook, bg=self.dominant_color)
+        notebook.add(commands_tab, text='Commands')
+        commands_tab.rowconfigure(0, weight=1)
+        commands_tab.columnconfigure(0, weight=1)
+
+        command_list_frame = tk.Frame(commands_tab, bg=self.dominant_color)
+        command_list_frame.grid(row=0, column=0, pady=5, padx=5, sticky='nsew')
+        command_list_frame.rowconfigure(0, weight=1)
+        command_list_frame.columnconfigure(0, weight=1)
+
+        self.ssh_commands = ["vkenable off", "snmp on", "timezone 10"]
+        self.command_listbox = tk.Listbox(command_list_frame, selectmode=tk.EXTENDED, font=('Arial', 14), height=len(self.ssh_commands))
+        for command in self.ssh_commands:
+            self.command_listbox.insert(tk.END, command)
+        self.command_listbox.grid(row=0, column=0, sticky='nsew')
+        
+        scrollbar = ttk.Scrollbar(command_list_frame, orient='vertical', command=self.command_listbox.yview)
+        self.command_listbox.config(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+
+        self.run_command_button = tk.Button(commands_tab, text="Run Selected Commands", font=self.standard_font, bg=self.accent_color, command=self.display_command_code_data_threaded)
+        self.run_command_button.grid(row=1, column=0, pady=(10, 5), padx=5, sticky='ew')
 
         # --- Status section ---
         status_frame = tk.Frame(self.left_panel, bg=self.dominant_color)
         status_frame.grid(row=4, column=0, columnspan=3, pady=10, sticky='ew', padx=5)
         status_frame.columnconfigure(0, weight=1)
-
         self.status_label = tk.Label(status_frame, text="Ready", font=self.standard_font, bg=self.dominant_color, fg='black')
         self.status_label.grid(row=0, column=0, pady=5, sticky='ew')
-
         self.progress_bar = ttk.Progressbar(status_frame, mode='indeterminate')
         self.progress_bar.grid(row=1, column=0, pady=5, sticky='ew')
 
@@ -247,56 +249,39 @@ class AppSpaceDeviceManager:
         """Create the screenshot display area in the right panel."""
         screenshot_frame = tk.LabelFrame(self.right_panel, text="Screenshot Display", font=self.standard_font, bg=self.dominant_color, fg='black')
         screenshot_frame.pack(fill='both', expand=True, padx=5, pady=10)
-
-        # Screenshot controls
         controls_frame = tk.Frame(screenshot_frame, bg=self.dominant_color)
         controls_frame.pack(fill='x', padx=10, pady=5)
-
         self.load_screenshot_button = tk.Button(controls_frame, text="Load Screenshot", font=('Arial', 12), bg=self.accent_color, command=self.load_screenshot_file)
         self.load_screenshot_button.pack(side='left', padx=5)
-
         self.save_screenshot_button = tk.Button(controls_frame, text="Save As...", font=('Arial', 12), bg=self.accent_color, command=self.save_screenshot_as)
         self.save_screenshot_button.pack(side='left', padx=5)
-
         self.clear_screenshot_button = tk.Button(controls_frame, text="Clear", font=('Arial', 12), bg=self.error_color, command=self.clear_screenshot)
         self.clear_screenshot_button.pack(side='left', padx=5)
-
-        # Screenshot info label
         self.screenshot_info_label = tk.Label(controls_frame, text="No screenshot loaded", font=('Arial', 10), bg=self.dominant_color)
         self.screenshot_info_label.pack(side='right', padx=5)
-
-        # Scrollable screenshot display
         self.create_scrollable_screenshot_area(screenshot_frame)
 
     def create_scrollable_screenshot_area(self, parent):
         """Create a scrollable area for the screenshot display."""
         self.screenshot_canvas = tk.Canvas(parent, bg='white', highlightthickness=1, highlightbackground='gray')
-        
         v_scrollbar = ttk.Scrollbar(parent, orient='vertical', command=self.screenshot_canvas.yview)
         h_scrollbar = ttk.Scrollbar(parent, orient='horizontal', command=self.screenshot_canvas.xview)
-        
         self.screenshot_canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-
         v_scrollbar.pack(side='right', fill='y')
         h_scrollbar.pack(side='bottom', fill='x')
         self.screenshot_canvas.pack(side='left', fill='both', expand=True, padx=10, pady=5)
-
-        # Create a label for displaying the image
         self.screenshot_label = tk.Label(self.screenshot_canvas, bg='white', text="Take a screenshot or load an image to display here", font=('Arial', 14), fg='gray')
         self.canvas_window = self.screenshot_canvas.create_window(0, 0, anchor='nw', window=self.screenshot_label)
-
-        # Bind events
         self.screenshot_canvas.bind('<Configure>', self.on_canvas_configure)
         self.screenshot_canvas.bind('<MouseWheel>', self.on_mousewheel)
-        self.screenshot_canvas.bind('<Button-4>', self.on_mousewheel)  # For Linux
-        self.screenshot_canvas.bind('<Button-5>', self.on_mousewheel)  # For Linux
+        self.screenshot_canvas.bind('<Button-4>', self.on_mousewheel)
+        self.screenshot_canvas.bind('<Button-5>', self.on_mousewheel)
 
     def on_canvas_configure(self, event):
         """Handle canvas resize events."""
         if hasattr(self, 'screenshot_image') and self.screenshot_image:
             self.screenshot_canvas.configure(scrollregion=self.screenshot_canvas.bbox("all"))
         else:
-            # Center the placeholder text
             canvas_width = event.width
             canvas_height = event.height
             self.screenshot_canvas.coords(self.canvas_window, canvas_width // 2, canvas_height // 2)
@@ -304,10 +289,8 @@ class AppSpaceDeviceManager:
     def on_mousewheel(self, event):
         """Handle mouse wheel scrolling."""
         if hasattr(event, 'delta'):
-            # For Windows
             self.screenshot_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         else:
-            # For Linux
             if event.num == 4:
                 self.screenshot_canvas.yview_scroll(-1, "units")
             elif event.num == 5:
@@ -318,11 +301,8 @@ class AppSpaceDeviceManager:
         try:
             pil_image = Image.open(image_path)
             original_width, original_height = pil_image.size
-
-            # Calculate display size, maintaining aspect ratio
             max_width, max_height = 1280, 800
             ratio = min(max_width / original_width, max_height / original_height, 1.0)
-            
             if ratio < 1.0:
                 display_width = int(original_width * ratio)
                 display_height = int(original_height * ratio)
@@ -330,12 +310,10 @@ class AppSpaceDeviceManager:
             else:
                 display_image = pil_image
                 display_width, display_height = original_width, original_height
-
             self.screenshot_image = ImageTk.PhotoImage(display_image)
             self.screenshot_label.configure(image=self.screenshot_image, text="")
             self.screenshot_canvas.configure(scrollregion=(0, 0, display_width, display_height))
             self.screenshot_canvas.coords(self.canvas_window, 0, 0)
-
             self.screenshot_info_label.configure(text=f"Size: {original_width}x{original_height} | Display: {display_width}x{display_height}")
             self.current_screenshot_path = image_path
             self.save_screenshot_button.configure(state='normal')
@@ -346,18 +324,8 @@ class AppSpaceDeviceManager:
 
     def load_screenshot_file(self):
         """Load a screenshot file from the disk."""
-        file_types = [
-            ("Image files", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff"),
-            ("PNG files", "*.png"),
-            ("JPEG files", "*.jpg *.jpeg"),
-            ("Bitmap files", "*.bmp"),
-            ("All files", "*.*")
-        ]
-        file_path = filedialog.askopenfilename(
-            title="Select Screenshot File",
-            filetypes=file_types,
-            initialdir=str(Path.home() / "Downloads")
-        )
+        file_types = [("Image files", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff"), ("All files", "*.*")]
+        file_path = filedialog.askopenfilename(title="Select Screenshot File", filetypes=file_types, initialdir=str(Path.home() / "Downloads"))
         if file_path:
             self.display_screenshot(file_path)
             self.update_status(f"Screenshot loaded: {Path(file_path).name}", self.success_color)
@@ -367,19 +335,8 @@ class AppSpaceDeviceManager:
         if not self.current_screenshot_path or not os.path.exists(self.current_screenshot_path):
             messagebox.showwarning("Warning", "No screenshot to save")
             return
-
-        file_types = [
-            ("PNG files", "*.png"),
-            ("JPEG files", "*.jpg"),
-            ("Bitmap files", "*.bmp"),
-            ("All files", "*.*")
-        ]
-        save_path = filedialog.asksaveasfilename(
-            title="Save Screenshot As",
-            filetypes=file_types,
-            defaultextension=".png",
-            initialdir=str(Path.home() / "Downloads")
-        )
+        file_types = [("PNG files", "*.png"), ("JPEG files", "*.jpg"), ("Bitmap files", "*.bmp"), ("All files", "*.*")]
+        save_path = filedialog.asksaveasfilename(title="Save Screenshot As", filetypes=file_types, defaultextension=".png", initialdir=str(Path.home() / "Downloads"))
         if save_path:
             try:
                 import shutil
@@ -392,18 +349,14 @@ class AppSpaceDeviceManager:
         """Clear the screenshot display."""
         self.screenshot_image = None
         self.current_screenshot_path = None
-        
         self.screenshot_label.configure(image="", text="Take a screenshot or load an image to display here")
         self.screenshot_info_label.configure(text="No screenshot loaded")
         self.save_screenshot_button.configure(state='disabled')
-
-        # Reset canvas
         canvas_width = self.screenshot_canvas.winfo_width()
         canvas_height = self.screenshot_canvas.winfo_height()
         if canvas_width > 1 and canvas_height > 1:
             self.screenshot_canvas.coords(self.canvas_window, canvas_width // 2, canvas_height // 2)
             self.screenshot_canvas.configure(scrollregion=(0, 0, 0, 0))
-            
         self.update_status("Screenshot display cleared", self.success_color)
 
     def update_status(self, message, color='black'):
@@ -425,19 +378,15 @@ class AppSpaceDeviceManager:
         if not tms_name:
             self.update_status("Please select a device", self.error_color)
             return
-
         if self.df is not None and tms_name in self.df['Device Name'].values:
             vc_details = self.df[self.df['Device Name'] == tms_name].iloc[0]
             detail_keys = ['Device Name', 'Device IP', 'Location', 'Device Group', 'MAC Address']
             for label, key in zip(self.detail_labels, detail_keys):
                 value = vc_details.get(key, 'N/A')
                 label.config(text=f"{key}: {value}")
-            
-            # Auto-populate the IP address field if available
             if 'Device IP' in vc_details and pd.notna(vc_details['Device IP']):
                 self.chat_box.delete(0, tk.END)
                 self.chat_box.insert(0, str(vc_details['Device IP']))
-                
             self.update_status(f"Details loaded for {tms_name}", self.success_color)
         else:
             self.update_status("Device not found in database", self.error_color)
@@ -452,7 +401,6 @@ class AppSpaceDeviceManager:
         if not tms_name:
             self.update_status("Please select a device", self.error_color)
             return
-
         if self.df is not None and tms_name in self.df['Device Name'].values:
             vc_details = self.df[self.df['Device Name'] == tms_name].iloc[0]
             if 'Device Id' in vc_details and pd.notna(vc_details['Device Id']):
@@ -475,28 +423,20 @@ class AppSpaceDeviceManager:
         if not hostname or not userid:
             self.update_status("Please enter device IP and username", self.error_color)
             return
-
         self.start_progress()
         self.update_status("Taking screenshot...")
-        
         try:
             downloads_path = Path.home() / "Downloads"
             downloads_path.mkdir(exist_ok=True)
-            
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
             ssh_username = self.config.get('SSH', 'username', fallback='admin')
             ssh_password = self.config.get('SSH', 'password', fallback='Blackr0ck')
             timeout = int(self.config.get('SSH', 'timeout', fallback='30'))
-
             ssh_client.connect(hostname=hostname, username=ssh_username, password=ssh_password, timeout=timeout)
             self.update_status(f"Connected to {hostname}")
-            
             stdin, stdout, stderr = ssh_client.exec_command('screenshot')
             output = stdout.read().decode()
-
-            # Try to download the screenshot file (could be .bmp or .png)
             remote_file_paths = ['/logs/ScreenShot.bmp', '/logs/ScreenShot.png']
             downloaded = False
             for remote_file_path in remote_file_paths:
@@ -511,10 +451,8 @@ class AppSpaceDeviceManager:
                     break 
                 except FileNotFoundError:
                     continue
-            
             if downloaded:
                 self.root.after(500, lambda: self.display_screenshot(str(local_file_path)))
-
         except Exception as e:
             self.update_status(f"Screenshot failed: {str(e)}", self.error_color)
             logger.error(f"Screenshot error: {e}")
@@ -530,22 +468,20 @@ class AppSpaceDeviceManager:
         threading.Thread(target=self.display_command_code_data, daemon=True).start()
 
     def display_command_code_data(self):
-        """Execute the selected pre-defined command."""
+        """Execute the selected pre-defined commands."""
         hostname = self.chat_box.get().strip()
         if not hostname:
             self.update_status("Please enter device IP", self.error_color)
             return
-
-        # Get the selected command from the dropdown
-        selected_command = self.command_selection_box.get()
-
-        # Check if a valid command was selected
-        if not selected_command or selected_command == "Select a command":
-            self.update_status("Please select a command to run", self.error_color)
+        selected_indices = self.command_listbox.curselection()
+        if not selected_indices:
+            self.update_status("Please select one or more commands to run", self.error_color)
             return
-
-        # Execute only the selected command
-        self.execute_ssh_command(hostname, selected_command, f"Command '{selected_command}' sent.")
+        commands_to_run = [self.command_listbox.get(i) for i in selected_indices]
+        self.update_status(f"Running {len(commands_to_run)} command(s)...")
+        for command in commands_to_run:
+            self.execute_ssh_command(hostname, command, f"Command '{command}' sent.")
+        self.update_status("All selected commands sent successfully!", self.success_color)
 
     def reboot_device_threaded(self):
         """Reboot the device using a separate thread after confirmation."""
@@ -564,21 +500,16 @@ class AppSpaceDeviceManager:
         """Execute a generic SSH command on a device."""
         self.start_progress()
         self.update_status(f"Executing command: {command}")
-        
         try:
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
             ssh_username = self.config.get('SSH', 'username', fallback='admin')
             ssh_password = self.config.get('SSH', 'password', fallback='Blackr0ck')
             timeout = int(self.config.get('SSH', 'timeout', fallback='30'))
-
             ssh_client.connect(ip_address, username=ssh_username, password=ssh_password, timeout=timeout)
             stdin, stdout, stderr = ssh_client.exec_command(command)
-            
             output = stdout.read().decode()
             error = stderr.read().decode()
-            
             if error:
                 self.update_status(f"Command error: {error}", self.error_color)
             else:
@@ -595,26 +526,18 @@ class AppSpaceDeviceManager:
 
     def load_csv_file(self):
         """Load a new CSV file and update the application."""
-        file_path = filedialog.askopenfilename(
-            title="Select Device Directory CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
+        file_path = filedialog.askopenfilename(title="Select Device Directory CSV", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
         if file_path:
             try:
                 self.df = pd.read_csv(file_path)
                 self.df_sorted = self.df.sort_values(by='Device Name', na_position='last')
                 self.tms_names = self.df_sorted['Device Name'].dropna().tolist()
-
-                # Update UI elements
                 self.dropdown_tms_names['values'] = self.tms_names
                 self.dropdown_tms_names.set_completion_list(self.tms_names)
                 self.label_item_count.config(text=f"Total Devices: {len(self.tms_names)}")
-                
-                # Update config
                 self.config.set('PATHS', 'csv_file', file_path)
                 with open('config.ini', 'w') as f:
                     self.config.write(f)
-
                 self.update_status(f"Loaded {len(self.tms_names)} devices", self.success_color)
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load CSV: {e}")
@@ -625,7 +548,6 @@ class AppSpaceDeviceManager:
         if hasattr(self, 'dropdown_tms_names'):
             self.dropdown_tms_names['values'] = self.tms_names
             self.dropdown_tms_names.set_completion_list(self.tms_names)
-        
         self.label_item_count.config(text=f"Total Devices: {len(self.tms_names)}")
         self.update_status("Data refreshed", self.success_color)
 
@@ -669,7 +591,6 @@ class AutocompleteCombobox(ttk.Combobox):
             else:
                 data = [item for item in self._completion_list if value.lower() in item.lower()]
             self['values'] = data
-
         if event.keysym == "Escape":
             self.reset_completion_list()
 
