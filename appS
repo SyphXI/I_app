@@ -61,7 +61,7 @@ class AppSpaceDeviceManager:
                 'screenshot_path': 'Downloads'
             }
             config['FILES'] = {
-                'rs_id_excel_path': r'S:\Tecnology\All Technology\Multimedia\Engineering\Resources\card_room_roomid.xlsx'
+                'rs_id_excel_path': ''  # Left blank, will prompt user on first run
             }
             with open(config_file, 'w') as f:
                 config.write(f)
@@ -554,15 +554,25 @@ class AppSpaceDeviceManager:
         try:
             file_path = self.config.get('FILES', 'rs_id_excel_path', fallback='')
             if not file_path or not os.path.exists(file_path):
-                error_msg = f"Error: RS ID Excel file not found or path not configured in config.ini"
-                self.update_status(error_msg, self.error_color)
-                logger.error(error_msg)
-                messagebox.showerror("File Not Found", f"{error_msg}\nPlease check the 'rs_id_excel_path' in config.ini.")
-                return
+                messagebox.showinfo("Excel File Not Found", "Please select the 'card_room_roomid.xlsx' file.")
+                new_file_path = filedialog.askopenfilename(
+                    title="Select RS ID Excel File",
+                    filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+                )
+                if new_file_path:
+                    self.config.set('FILES', 'rs_id_excel_path', new_file_path)
+                    with open('config.ini', 'w') as f:
+                        self.config.write(f)
+                    file_path = new_file_path
+                else:
+                    self.update_status("Excel file selection cancelled.", self.error_color)
+                    self.stop_progress()
+                    return
 
             rs_id = self.rs_id_entry.get().strip()
             if not rs_id:
                 self.update_status("Please enter an RS ID.", self.error_color)
+                self.stop_progress()
                 return
 
             self.update_status(f"Updating Excel file at {file_path}...")
