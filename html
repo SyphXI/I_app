@@ -37,115 +37,78 @@ def load_config():
             'timeout': '30'
         }
         config['PATHS'] = {
-            'csv_file': 'Device Directory.csv',
-            'output_directory': 'screenshots'
+            'csv_file': 'Device Directory.csv'
         }
         with open(config_file, 'w') as f:
             config.write(f)
-        logger.info(f"Default '{config_file}' created. Please edit it with your device password and paths.")
     else:
         config.read(config_file)
     return config
 
-# --- 3. Device Data Handling ---
-def load_device_data(csv_file_path):
-    """
-    Reads the device information from the specified CSV file using pandas.
-    The CSV should contain 'Device Name' and 'Device IP' columns.
-    Returns a list of device dictionaries.
-    """
-    try:
-        df = pd.read_csv(csv_file_path)
-        # Ensure required columns exist
-        if 'Device Name' not in df.columns or 'Device IP' not in df.columns:
-            logger.error("CSV file must contain 'Device Name' and 'Device IP' columns.")
-            return []
-        # Drop rows where Device Name or Device IP is missing
-        df.dropna(subset=['Device Name', 'Device IP'], inplace=True)
-        # Sort by device name for consistent ordering
-        df_sorted = df.sort_values(by='Device Name').reset_index(drop=True)
-        devices = df_sorted[['Device Name', 'Device IP']].to_dict('records')
-        logger.info(f"Successfully loaded {len(devices)} devices from '{csv_file_path}'.")
-        return devices
-    except FileNotFoundError:
-        logger.error(f"Error: The device CSV file was not found at '{csv_file_path}'.")
-        logger.error("Please ensure the 'csv_file' path in 'config.ini' is correct.")
-        return []
-    except Exception as e:
-        logger.error(f"An error occurred while reading the CSV file: {e}")
-        return []
-
-# --- 4. Core SSH and Screenshot Logic ---
+# --- 3. Screenshot and File Handling ---
 def take_screenshot_and_save(device_name, ip_address, output_dir, ssh_config):
     """
-    Connects to a device via SSH, takes a screenshot, and downloads it.
-    This is the core function for interacting with each device.
+    Connects to a device via SSH, takes a screenshot, and saves it.
+    Returns a tuple of (filename, error_message).
+    If successful, error_message will be None.
+    If it fails, filename will be None and error_message will contain a description.
     """
-    local_filename = f"{device_name.replace(' ', '_').replace('/', '_')}.png"
-    local_filepath = output_dir / local_filename
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     
-    logger.info(f"[{device_name}] Attempting to connect to {ip_address}...")
-
     try:
-        # Establish SSH connection
-        with paramiko.SSHClient() as ssh_client:
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_client.connect(
-                hostname=ip_address,
-                username=ssh_config['username'],
-                password=ssh_config['password'],
-                timeout=int(ssh_config['timeout'])
-            )
-            logger.info(f"[{device_name}] SSH connection successful.")
-            
-            # Execute screenshot command
-            logger.info(f"[{device_name}] Executing screenshot command...")
-            stdin, stdout, stderr = ssh_client.exec_command('screenshot')
-            # Wait for the command to complete
-            stdout.channel.recv_exit_status() 
-            logger.info(f"[{device_name}] Screenshot command executed.")
-            
-            # Transfer the screenshot file via SFTP
-            remote_paths_to_try = ['/logs/ScreenShot.png', '/logs/ScreenShot.bmp']
-            downloaded = False
-            with ssh_client.open_sftp() as sftp:
-                for remote_path in remote_paths_to_try:
-                    try:
-                        logger.info(f"[{device_name}] Trying to download '{remote_path}'...")
-                        sftp.get(remote_path, str(local_filepath))
-                        logger.info(f"[{device_name}] Successfully downloaded screenshot to '{local_filepath}'.")
-                        downloaded = True
-                        break # Exit loop once a file is found and downloaded
-                    except FileNotFoundError:
-                        logger.warning(f"[{device_name}] Remote file not found at '{remote_path}'.")
-                        continue
-            
-            if not downloaded:
-                logger.error(f"[{device_name}] Failed to find screenshot file on the device.")
-                return None
+        # Connect to the device
+        ssh_client.connect(
+            hostname=ip_address,
+            username=ssh_config['username'],
+            password=ssh_config['password'],
+            timeout=int(ssh_config['timeout'])
+        )
+        
+        # Define the remote and local file paths
+        remote_filename = f"/tmp/{device_name}_screenshot.png"
+        local_filename = os.path.join(output_dir, f"{device_name}_screenshot.png")
+        
+        # Take the screenshot
+        stdin, stdout, stderr = ssh_client.exec_command(f"scrot {remote_filename}")
+        exit_status = stdout.channel.recv_exit_status()
+        
+        if exit_status != 0:
+            error_output = stderr.read().decode('utf-8').strip()
+            error_msg = f"Screenshot command failed with exit code {exit_status}. Error: {error_output}"
+            logger.error(f"[{device_name}] {error_msg}")
+            return None, error_msg
 
-        return local_filename
+        # Transfer the file using SFTP
+        sftp = ssh_client.open_sftp()
+        sftp.get(remote_filename, local_filename)
+        sftp.close()
 
+        # Clean up the remote file
+        ssh_client.exec_command(f"rm {remote_filename}")
+        
+        return local_filename, None
+        
     except paramiko.AuthenticationException:
-        logger.error(f"[{device_name}] Authentication failed. Check username/password in 'config.ini'.")
-        return None
+        error_msg = "Authentication failed. Check credentials in 'config.ini'."
+        logger.error(f"[{device_name}] {error_msg}")
+        return None, error_msg
     except paramiko.SSHException as e:
-        logger.error(f"[{device_name}] SSH connection error: {e}")
-        return None
+        error_msg = f"SSH connection failed: {e}"
+        logger.error(f"[{device_name}] {error_msg}")
+        return None, error_msg
     except Exception as e:
-        logger.error(f"[{device_name}] An unexpected error occurred: {e}")
-        return None
+        error_msg = f"An unexpected error occurred: {e}"
+        logger.error(f"[{device_name}] {error_msg}")
+        return None, error_msg
+    finally:
+        ssh_client.close()
 
-# --- 5. HTML Gallery Generation ---
-def generate_html_gallery(output_dir, screenshot_files):
+def generate_html_gallery(output_dir, screenshot_files, failed_devices_with_errors):
     """
-    Generates an 'index.html' file to display the captured screenshots in a gallery format.
+    Generates a single HTML file to display the screenshots.
+    This function now also includes cards for failed devices with their error messages.
     """
-    if not screenshot_files:
-        logger.warning("No screenshots were captured, so no HTML gallery will be generated.")
-        return
-
-    logger.info("Generating HTML gallery...")
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -154,125 +117,113 @@ def generate_html_gallery(output_dir, screenshot_files):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Device Screenshots</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 0; background-color: #f4f4f9; }
-            header { background-color: #4a6da7; color: white; padding: 1rem; text-align: center; }
-            h1 { margin: 0; }
-            .gallery { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; padding: 20px; }
-            .card { background-color: white; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); overflow: hidden; width: 400px; }
-            .card h2 { font-size: 1rem; padding: 10px; margin: 0; background-color: #f1f1f1; text-align: center; }
-            .card img { max-width: 100%; height: auto; display: block; }
+            body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }
+            .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+            .card { background-color: white; border: 1px solid #ddd; border-radius: 8px; padding: 15px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); text-align: center; }
+            .card img { max-width: 100%; height: auto; border-radius: 4px; margin-bottom: 10px; }
+            .card h2 { margin: 0 0 10px 0; font-size: 1.2em; color: #333; }
+            .error-card { background-color: #ffebeb; border: 1px solid #ff0000; }
+            .error-message { padding: 10px; font-style: italic; color: #666; }
         </style>
     </head>
     <body>
-        <header>
-            <h1>Device Screenshot Gallery</h1>
-            <p>Generated on: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
-        </header>
+        <h1>Device Screenshot Gallery</h1>
         <div class="gallery">
     """
-
-    # Sort files alphabetically for a consistent order
-    screenshot_files.sort()
-
+    
+    # Add cards for successful screenshots
     for filename in screenshot_files:
-        device_name = os.path.splitext(filename)[0].replace('_', ' ')
+        device_name = os.path.basename(filename).replace('_screenshot.png', '')
         html_content += f"""
             <div class="card">
                 <h2>{device_name}</h2>
-                <img src="{filename}" alt="Screenshot of {device_name}">
+                <img src="{os.path.basename(filename)}" alt="Screenshot of {device_name}">
             </div>
         """
-
+        
+    # Add cards for failed devices
+    for device_name, error_msg in failed_devices_with_errors.items():
+        html_content += f"""
+            <div class="card error-card">
+                <h2>{device_name}</h2>
+                <p class="error-message">Error: {error_msg}</p>
+            </div>
+        """
+    
     html_content += """
         </div>
     </body>
     </html>
     """
-
-    html_filepath = output_dir / 'index.html'
-    with open(html_filepath, 'w') as f:
+    
+    # Save the HTML file
+    with open(os.path.join(output_dir, 'index.html'), 'w') as f:
         f.write(html_content)
-    logger.info(f"HTML gallery saved to '{html_filepath}'.")
 
-# --- 6. Main Execution Flow ---
+# --- 4. Main Execution Logic ---
 def main():
     """
-    The main function that orchestrates the entire script's execution.
+    Main function to orchestrate the entire process.
     """
-    logger.info("--- Starting Multi-Device Screenshot Tool ---")
-    
-    # Load configuration
     config = load_config()
-    ssh_config = config['SSH']
-    paths_config = config['PATHS']
-
-    # Create a timestamped output directory
-    base_output_dir = Path(paths_config.get('output_directory', 'screenshots'))
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    output_dir = base_output_dir / f"screenshots_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Output will be saved in: {output_dir}")
     
-    # Load device data
-    devices = load_device_data(paths_config['csv_file'])
-    if not devices:
-        logger.error("Exiting due to failure to load device data.")
+    try:
+        devices_df = pd.read_csv(config['PATHS']['csv_file'])
+    except FileNotFoundError:
+        logger.error(f"CSV file '{config['PATHS']['csv_file']}' not found. Please create it and try again.")
         return
-
-    # Prompt user to select devices
-    print("\nAvailable Devices:")
-    for i, device in enumerate(devices):
-        print(f"  {i+1}: {device['Device Name']} ({device['Device IP']})")
+        
+    print("\n--- Available Devices ---")
+    for i, row in devices_df.iterrows():
+        print(f"{i+1}. {row['Device Name']} ({row['Device IP']})")
     
-    print("\nEnter the numbers of the devices to screenshot, separated by commas (e.g., 1,3,5).")
-    print("Or type 'all' to select all devices.")
+    selected_indices = input("\nEnter the device numbers to screenshot (e.g., 1,3,4) or 'all': ")
     
-    user_input = input("> ").strip()
-    selected_devices = []
-
-    if user_input.lower() == 'all':
-        selected_devices = devices
+    if selected_indices.lower() == 'all':
+        selected_devices = devices_df.to_dict('records')
     else:
         try:
-            indices = [int(i.strip()) - 1 for i in user_input.split(',')]
-            for i in indices:
-                if 0 <= i < len(devices):
-                    selected_devices.append(devices[i])
-                else:
-                    print(f"Warning: Index {i+1} is out of range and will be ignored.")
-        except ValueError:
-            logger.error("Invalid input. Please enter numbers separated by commas.")
+            indices = [int(i.strip()) - 1 for i in selected_indices.split(',')]
+            selected_devices = [devices_df.iloc[i] for i in indices]
+        except (ValueError, IndexError):
+            logger.error("Invalid input. Please enter a comma-separated list of valid numbers.")
             return
 
     if not selected_devices:
         logger.warning("No devices selected. Exiting.")
         return
 
+    # Create a timestamped output directory
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_dir = Path(f"screenshots_{timestamp}")
+    output_dir.mkdir(exist_ok=True)
+
     logger.info(f"Starting screenshot process for {len(selected_devices)} selected device(s)...")
+    logger.info(f"Screenshots will be saved in: {output_dir}")
     
     successful_screenshots = []
-    failed_devices = []
-
+    failed_devices_with_errors = {}
+    
     # Loop through selected devices and take screenshots
     for device in selected_devices:
         device_name = device['Device Name']
         ip_address = device['Device IP']
         
-        filename = take_screenshot_and_save(device_name, ip_address, output_dir, ssh_config)
+        filename, error_message = take_screenshot_and_save(device_name, ip_address, output_dir, config['SSH'])
         
         if filename:
             successful_screenshots.append(filename)
         else:
-            failed_devices.append(device_name)
+            failed_devices_with_errors[device_name] = error_message
     
-    # Generate the HTML gallery
-    generate_html_gallery(output_dir, successful_screenshots)
+    # Generate the HTML gallery, now passing the dictionary of failed devices
+    generate_html_gallery(output_dir, successful_screenshots, failed_devices_with_errors)
     
     # Final summary
-    logger.info("--- Screenshot Process Complete ---")
+    logger.info("\n--- Screenshot Process Complete ---")
     logger.info(f"Successfully captured: {len(successful_screenshots)} screenshot(s).")
-    if failed_devices:
-        logger.warning(f"Failed to capture for: {len(failed_devices)} device(s): {', '.join(failed_devices)}")
+    if failed_devices_with_errors:
+        logger.warning(f"Failed to capture for: {len(failed_devices_with_errors)} device(s). Check the generated 'index.html' for details.")
     logger.info(f"All files are located in: {output_dir}")
     logger.info("You can now share this folder or open the 'index.html' file to view the gallery.")
 
