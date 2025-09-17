@@ -136,7 +136,37 @@ def take_screenshot_and_save(device_name, ip_address, output_dir, ssh_config):
         logger.error(f"[{device_name}] An unexpected error occurred: {e}")
         return None
 
-# --- 5. HTML Gallery Generation ---
+# --- 5. Excel and HTML Generation ---
+def generate_status_excelsheets(output_dir, selected_devices, failed_devices):
+    """
+    Generates two Excel files: one for online (successful) devices and one for offline (failed) devices.
+    """
+    logger.info("Generating device status Excel sheets...")
+
+    failed_set = set(failed_devices)
+    online_devices_data = []
+    offline_devices_data = []
+
+    for device in selected_devices:
+        if device['Device Name'] in failed_set:
+            offline_devices_data.append(device)
+        else:
+            online_devices_data.append(device)
+
+    # Create Online Devices Excel if there are any
+    if online_devices_data:
+        online_df = pd.DataFrame(online_devices_data)
+        online_filepath = output_dir / 'online_devices.xlsx'
+        online_df.to_excel(online_filepath, index=False, engine='openpyxl')
+        logger.info(f"Saved online devices list to '{online_filepath}'.")
+
+    # Create Offline Devices Excel if there are any
+    if offline_devices_data:
+        offline_df = pd.DataFrame(offline_devices_data)
+        offline_filepath = output_dir / 'offline_devices.xlsx'
+        offline_df.to_excel(offline_filepath, index=False, engine='openpyxl')
+        logger.info(f"Saved offline devices list to '{offline_filepath}'.")
+
 def generate_html_gallery(output_dir, selected_devices, failed_devices):
     """
     Generates an 'index.html' file to display captured screenshots and indicate failed connections.
@@ -163,12 +193,38 @@ def generate_html_gallery(output_dir, selected_devices, failed_devices):
             .card h2 { font-size: 1rem; padding: 10px; margin: 0; background-color: #f1f1f1; text-align: center; color: #333; }
             .card img { max-width: 100%; height: auto; display: block; }
             .status-text { padding: 40px 20px; text-align: center; font-size: 1.2rem; color: #c62828; font-weight: bold; }
+            .download-links { margin-top: 1rem; }
+            .download-links a {
+                background-color: #ffffff;
+                color: #4a6da7;
+                padding: 8px 15px;
+                text-decoration: none;
+                border-radius: 5px;
+                font-weight: bold;
+                margin: 0 10px;
+                transition: background-color 0.3s, color 0.3s;
+                border: 1px solid #4a6da7;
+            }
+            .download-links a:hover {
+                background-color: #4a6da7;
+                color: #ffffff;
+            }
         </style>
     </head>
     <body>
         <header>
             <h1>Device Screenshot Gallery</h1>
             <p>Generated on: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+            <div class="download-links">
+    """
+    # Conditionally add download links if the files exist
+    if os.path.exists(output_dir / 'online_devices.xlsx'):
+        html_content += '<a href="online_devices.xlsx" download>Download Online Devices List</a>'
+    if os.path.exists(output_dir / 'offline_devices.xlsx'):
+        html_content += '<a href="offline_devices.xlsx" download>Download Offline Devices List</a>'
+
+    html_content += """
+            </div>
         </header>
         <div class="gallery">
     """
@@ -283,6 +339,9 @@ def main():
         else:
             failed_devices.append(device_name)
     
+    # Generate the Excel sheets with online/offline status
+    generate_status_excelsheets(output_dir, selected_devices, failed_devices)
+
     # Generate the HTML gallery with results for all selected devices
     generate_html_gallery(output_dir, selected_devices, failed_devices)
     
