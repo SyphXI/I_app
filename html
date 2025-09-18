@@ -269,6 +269,33 @@ def generate_html_gallery(output_dir, selected_devices, failed_devices):
     logger.info(f"HTML gallery saved to '{html_filepath}'.")
 
 # --- 6. Main Execution Flow ---
+def parse_selection(selection_str, total_items):
+    """Parses a user input string like '1,3,5-7' into a list of valid indices."""
+    indices = set()
+    try:
+        # Split by comma for individual numbers or ranges
+        parts = selection_str.split(',')
+        for part in parts:
+            part = part.strip()
+            if '-' in part:
+                # Handle ranges like '5-10'
+                start, end = map(int, part.split('-'))
+                # A little sanity check to allow '10-5' as well
+                if start > end:
+                    start, end = end, start
+                for i in range(start, end + 1):
+                    # Check if the number is within the valid range of devices
+                    if 1 <= i <= total_items:
+                        indices.add(i - 1) # Convert to 0-based index
+            elif part: # Handle individual numbers
+                i = int(part)
+                if 1 <= i <= total_items:
+                    indices.add(i - 1) # Convert to 0-based index
+    except ValueError:
+        logger.error(f"Invalid format in selection: '{selection_str}'. Please use numbers, commas, and hyphens.")
+        return None # Return None to indicate an error
+    return sorted(list(indices))
+
 def main():
     """
     The main function that orchestrates the entire script's execution.
@@ -298,7 +325,7 @@ def main():
     for i, device in enumerate(devices):
         print(f"  {i+1}: {device['Device Name']} ({device['Device IP']})")
     
-    print("\nEnter the numbers of the devices to screenshot, separated by commas (e.g., 1,3,5).")
+    print("\nEnter device numbers (e.g., 1,3,5 or 45-55).")
     print("Or type 'all' to select all devices.")
     
     user_input = input("> ").strip()
@@ -307,19 +334,18 @@ def main():
     if user_input.lower() == 'all':
         selected_devices = devices
     else:
-        try:
-            indices = [int(i.strip()) - 1 for i in user_input.split(',')]
-            for i in indices:
-                if 0 <= i < len(devices):
-                    selected_devices.append(devices[i])
-                else:
-                    print(f"Warning: Index {i+1} is out of range and will be ignored.")
-        except ValueError:
-            logger.error("Invalid input. Please enter numbers separated by commas.")
+        # Use the new parsing function to handle ranges and single numbers
+        indices = parse_selection(user_input, len(devices))
+        
+        # If parsing returns None, it means there was an error
+        if indices is None:
             return
 
+        for i in indices:
+            selected_devices.append(devices[i])
+
     if not selected_devices:
-        logger.warning("No devices selected. Exiting.")
+        logger.warning("No valid devices selected. Exiting.")
         return
 
     logger.info(f"Starting screenshot process for {len(selected_devices)} selected device(s)...")
