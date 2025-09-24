@@ -1,9 +1,11 @@
+```python
 # screenshot_tool.py
 #
 # A command-line tool to automate taking screenshots from multiple devices,
 # saving them into a timestamped folder, and generating an HTML gallery for easy viewing.
 # This script is designed to be run from the command line and uses a config.ini
 # file for settings, similar to the AppSpace Device Manager.
+# Updated with: parallel processing, reduced timeouts, CLI args, and enhanced selection.
 
 import os
 import pandas as pd
@@ -12,6 +14,18 @@ import configparser
 import logging
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import argparse
+import time
+
+# Optional: For progress bar (install via pip if needed)
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    def tqdm(iterable, desc):  # Fallback
+        return iterable
 
 # --- 1. Setup Logging ---
 # Configure logging to provide clear, informative output to the console.
@@ -34,7 +48,8 @@ def load_config():
         config['SSH'] = {
             'username': 'admin',
             'password': 'YourDevicePassword', # IMPORTANT: Change this!
-            'timeout': '30'
+            'timeout': '15',  # Reduced from 30 for faster failure detection
+            'max_workers': '5'  # For parallel processing
         }
         config['PATHS'] = {
             'csv_file': 'Device Directory.csv',
@@ -108,6 +123,7 @@ def take_screenshot_and_save(device_name, ip_address, output_dir, ssh_config):
             # Transfer the screenshot file via SFTP
             remote_paths_to_try = ['/logs/ScreenShot.png', '/logs/ScreenShot.bmp']
             downloaded = False
+            remote_path_downloaded = None
             with ssh_client.open_sftp() as sftp:
                 for remote_path in remote_paths_to_try:
                     try:
@@ -115,10 +131,19 @@ def take_screenshot_and_save(device_name, ip_address, output_dir, ssh_config):
                         sftp.get(remote_path, str(local_filepath))
                         logger.info(f"[{device_name}] Successfully downloaded screenshot to '{local_filepath}'.")
                         downloaded = True
+                        remote_path_downloaded = remote_path
                         break # Exit loop once a file is found and downloaded
                     except FileNotFoundError:
                         logger.warning(f"[{device_name}] Remote file not found at '{remote_path}'.")
                         continue
+            
+            if downloaded and remote_path_downloaded:
+                # Clean up remote file after download
+                try:
+                    sftp.remove(remote_path_downloaded)
+                    logger.info(f"[{device_name}] Cleaned up remote file '{remote_path_downloaded}'.")
+                except Exception as cleanup_e:
+                    logger.warning(f"[{device_name}] Failed to clean up remote file: {cleanup_e}")
             
             if not downloaded:
                 logger.error(f"[{device_name}] Failed to find screenshot file on the device.")
@@ -300,6 +325,11 @@ def main():
     """
     The main function that orchestrates the entire script's execution.
     """
+    parser = argparse.ArgumentParser(description="Multi-Device Screenshot Tool")
+    parser.add_argument('--devices', default=None, help="Device selection (e.g., '1,3' or 'all'). If not provided, prompts interactively.")
+    parser.add_argument('--output', default=None, help="Custom output directory base (overrides config.ini).")
+    args = parser.parse_args()
+
     logger.info("--- Starting Multi-Device Screenshot Tool ---")
     
     # Load configuration
@@ -308,7 +338,7 @@ def main():
     paths_config = config['PATHS']
 
     # Create a timestamped output directory
-    base_output_dir = Path(paths_config.get('output_directory', 'screenshots'))
+    base_output_dir = Path(args.output or paths_config.get('output_directory', 'screenshots'))
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     output_dir = base_output_dir / f"screenshots_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -320,21 +350,24 @@ def main():
         logger.error("Exiting due to failure to load device data.")
         return
 
-    # Prompt user to select devices
-    print("\nAvailable Devices:")
-    for i, device in enumerate(devices):
-        print(f"  {i+1}: {device['Device Name']} ({device['Device IP']})")
-    
-    print("\nEnter device numbers (e.g., 1,3,5 or 45-55).")
-    print("Or type 'all' to select all devices.")
-    
-    user_input = input("> ").strip()
+    # Prompt user to select devices (or use CLI arg)
     selected_devices = []
+    if args.devices:
+        user_input = args.devices.strip()
+    else:
+        print("\nAvailable Devices:")
+        for i, device in enumerate(devices):
+            print(f"  {i+1}: {device['Device Name']} ({device['Device IP']})")
+        
+        print("\nEnter device numbers (e.g., 1,3,5 or 45-55).")
+        print("Or type 'all' to select all devices.")
+        
+        user_input = input("> ").strip()
 
     if user_input.lower() == 'all':
         selected_devices = devices
     else:
-        # Use the new parsing function to handle ranges and single numbers
+        # Use the parsing function to handle ranges and single numbers
         indices = parse_selection(user_input, len(devices))
         
         # If parsing returns None, it means there was an error
@@ -350,20 +383,36 @@ def main():
 
     logger.info(f"Starting screenshot process for {len(selected_devices)} selected device(s)...")
     
+    max_workers = int(ssh_config.get('max_workers', '5'))
     successful_screenshots = []
     failed_devices = []
 
-    # Loop through selected devices and take screenshots
-    for device in selected_devices:
-        device_name = device['Device Name']
-        ip_address = device['Device IP']
+    # Parallel processing loop
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_device = {
+            executor.submit(take_screenshot_and_save, device['Device Name'], device['Device IP'], output_dir, ssh_config): device
+            for device in selected_devices
+        }
         
-        filename = take_screenshot_and_save(device_name, ip_address, output_dir, ssh_config)
-        
-        if filename:
-            successful_screenshots.append(filename)
-        else:
-            failed_devices.append(device_name)
+        # Collect results as they complete (with optional progress)
+        progress_iter = tqdm(as_completed(future_to_device), total=len(selected_devices), desc="Processing devices") if TQDM_AVAILABLE else as_completed(future_to_device)
+        for future in progress_iter:
+            device = future_to_device[future]
+            device_name = device['Device Name']
+            try:
+                filename = future.result()
+                if filename:
+                    successful_screenshots.append(filename)
+                    logger.info(f"[{device_name}] Completed successfully.")
+                else:
+                    failed_devices.append(device_name)
+                    logger.warning(f"[{device_name}] Failed.")
+            except Exception as e:
+                failed_devices.append(device_name)
+                logger.error(f"[{device_name}] Thread error: {e}")
+    
+    logger.info(f"Processed {len(selected_devices)} devices in parallel with {max_workers} workers.")
     
     # Generate the Excel sheets with online/offline status
     generate_status_excelsheets(output_dir, selected_devices, failed_devices)
@@ -382,3 +431,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
