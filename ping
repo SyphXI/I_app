@@ -1,24 +1,39 @@
-# Load devices from file
-$devices = Get-Content -Path "devices.txt"
+# Load devices from file (error if missing)
+$devicesPath = "devices.txt"
+if (-not (Test-Path $devicesPath)) {
+    Write-Error "devices.txt not found! Create it with one IP/hostname per line."
+    exit 1
+}
+$devices = Get-Content -Path $devicesPath
 
-# Prepare results array
-$results = @()
+if ($devices.Count -eq 0) {
+    Write-Warning "No devices in list. Exiting."
+    exit 1
+}
 
-# Ping function (run in parallel with jobs)
-$devices | ForEach-Object -Parallel {
+# Collect results directly from parallel execution
+$results = $devices | ForEach-Object -Parallel {
     $device = $_
-    $ping = Test-Connection -ComputerName $device -Count 1 -Quiet -ErrorAction SilentlyContinue
-    $responseTime = if ($ping) { (Test-Connection -ComputerName $device -Count 1 -ErrorAction SilentlyContinue).ResponseTime } else { "N/A" }
+    $pingResult = Test-Connection -ComputerName $device -Count 1 -ErrorAction SilentlyContinue
+    $status = if ($pingResult) { "Online" } else { "Offline" }
+    $responseTime = if ($pingResult) { $pingResult.ResponseTime } else { "N/A" }
+    
     [PSCustomObject]@{
         Device = $device
-        Status = if ($ping) { "Online" } else { "Offline" }
+        Status = $status
         ResponseTime_ms = $responseTime
         Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     }
-} -ThrottleLimit 50 | ForEach-Object { $results += $_ }
+} -ThrottleLimit 50
 
-# Export to CSV (appends for historical tracking)
-$results | Export-Csv -Path "ping_results.csv" -NoTypeInformation -Append
+# Export to CSV with error handling (appends for history; change to -Force for overwrite)
+$csvPath = "ping_results.csv"
+try {
+    $results | Export-Csv -Path $csvPath -NoTypeInformation -Append
+    Write-Host "CSV exported successfully to $csvPath (rows: $($results.Count))"
+} catch {
+    Write-Error "Export failed: $($_.Exception.Message). Data in console below."
+}
 
 # Display summary in console
 Write-Host "Scan complete! Checked $($devices.Count) devices."
