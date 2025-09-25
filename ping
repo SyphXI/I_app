@@ -1,0 +1,25 @@
+# Load devices from file
+$devices = Get-Content -Path "devices.txt"
+
+# Prepare results array
+$results = @()
+
+# Ping function (run in parallel with jobs)
+$devices | ForEach-Object -Parallel {
+    $device = $_
+    $ping = Test-Connection -ComputerName $device -Count 1 -Quiet -ErrorAction SilentlyContinue
+    $responseTime = if ($ping) { (Test-Connection -ComputerName $device -Count 1 -ErrorAction SilentlyContinue).ResponseTime } else { "N/A" }
+    [PSCustomObject]@{
+        Device = $device
+        Status = if ($ping) { "Online" } else { "Offline" }
+        ResponseTime_ms = $responseTime
+        Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    }
+} -ThrottleLimit 50 | ForEach-Object { $results += $_ }
+
+# Export to CSV (appends for historical tracking)
+$results | Export-Csv -Path "ping_results.csv" -NoTypeInformation -Append
+
+# Display summary in console
+Write-Host "Scan complete! Checked $($devices.Count) devices."
+$results | Format-Table -AutoSize
