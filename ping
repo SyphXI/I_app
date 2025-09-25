@@ -1,40 +1,167 @@
-# Load devices from file (error if missing)
-$devicesPath = "devices.txt"
-if (-not (Test-Path $devicesPath)) {
-    Write-Error "devices.txt not found! Create it with one IP/hostname per line."
-    exit 1
-}
-$devices = Get-Content -Path $devicesPath
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import subprocess
+import threading
+import csv
+import os
+from datetime import datetime
+import queue
 
-if ($devices.Count -eq 0) {
-    Write-Warning "No devices in list. Exiting."
-    exit 1
-}
-
-# Collect results directly from parallel execution
-$results = $devices | ForEach-Object -Parallel {
-    $device = $_
-    $pingResult = Test-Connection -ComputerName $device -Count 1 -ErrorAction SilentlyContinue
-    $status = if ($pingResult) { "Online" } else { "Offline" }
-    $responseTime = if ($pingResult) { $pingResult.ResponseTime } else { "N/A" }
+class PingMonitor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Device Ping Monitor")
+        self.root.geometry("600x500")
+        
+        self.devices = []
+        self.results_queue = queue.Queue()
+        
+        self.setup_ui()
+        self.load_devices()
     
-    [PSCustomObject]@{
-        Device = $device
-        Status = $status
-        ResponseTime_ms = $responseTime
-        Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    }
-} -ThrottleLimit 50
+    def setup_ui(self):
+        # Device list frame
+        list_frame = ttk.Frame(self.root)
+        list_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+        
+        ttk.Label(list_frame, text="Devices:").pack(anchor=tk.W)
+        self.device_listbox = tk.Listbox(list_frame, height=10)
+        self.device_listbox.pack(pady=5, fill=tk.BOTH, expand=True)
+        
+        btn_frame = ttk.Frame(list_frame)
+        btn_frame.pack(pady=5)
+        
+        ttk.Button(btn_frame, text="Add Device", command=self.add_device).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Remove Selected", command=self.remove_device).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Load List", command=self.load_devices).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Save List", command=self.save_devices).pack(side=tk.LEFT, padx=5)
+        
+        # Scan frame
+        scan_frame = ttk.Frame(self.root)
+        scan_frame.pack(pady=10)
+        
+        self.scan_btn = ttk.Button(scan_frame, text="Scan Now", command=self.start_scan)
+        self.scan_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.progress = ttk.Progressbar(scan_frame, mode='indeterminate')
+        self.progress.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(scan_frame, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=5)
+        
+        # Results display
+        results_frame = ttk.Frame(self.root)
+        results_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+        
+        ttk.Label(results_frame, text="Results:").pack(anchor=tk.W)
+        self.results_text = tk.Text(results_frame, height=10, wrap=tk.NONE)
+        scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.results_text.yview)
+        self.results_text.configure(yscrollcommand=scrollbar.set)
+        self.results_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def add_device(self):
+        device = tk.simpledialog.askstring("Add Device", "Enter IP/hostname:")
+        if device and device.strip():
+            self.devices.append(device.strip())
+            self.update_listbox()
+    
+    def remove_device(self):
+        selection = self.device_listbox.curselection()
+        if selection:
+            del self.devices[selection[0]]
+            self.update_listbox()
+    
+    def update_listbox(self):
+        self.device_listbox.delete(0, tk.END)
+        for device in self.devices:
+            self.device_listbox.insert(tk.END, device)
+    
+    def load_devices(self):
+        filename = 'devices.txt'
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                self.devices = [line.strip() for line in f if line.strip()]
+            self.update_listbox()
+            messagebox.showinfo("Loaded", f"Loaded {len(self.devices)} devices from {filename}")
+        else:
+            messagebox.showwarning("File Not Found", f"{filename} not found. Start with empty list.")
+    
+    def save_devices(self):
+        with open('devices.txt', 'w') as f:
+            for device in self.devices:
+                f.write(device + '\n')
+        messagebox.showinfo("Saved", "Device list saved to devices.txt")
+    
+    def ping_device(self, device):
+        try:
+            # Windows ping: -n 1 (1 packet), -w 5000 (5s timeout in ms)
+            result = subprocess.run(['ping', '-n', '1', '-w', '5000', device], 
+                                  capture_output=True, text=True, timeout=6)
+            success = result.returncode == 0
+            if success:
+                # Extract time from output (e.g., "time=10ms")
+                time_line = [line for line in result.stdout.split('\n') if 'time=' in line]
+                response_time = time_line[0].split('time=')[1].split('ms')[0] if time_line else "N/A"
+            else:
+                response_time = "N/A"
+            status = "Online" if success else "Offline"
+        except Exception:
+            status = "Error"
+            response_time = "N/A"
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.results_queue.put(f"{device},{status},{response_time},{timestamp}\n")
+    
+    def start_scan(self):
+        if not self.devices:
+            messagebox.showwarning("No Devices", "Add devices first!")
+            return
+        
+        self.results_text.delete(1.0, tk.END)
+        self.progress.start()
+        self.scan_btn.config(state='disabled')
+        
+        threads = []
+        for device in self.devices:
+            t = threading.Thread(target=self.ping_device, args=(device,))
+            t.start()
+            threads.append(t)
+        
+        def wait_and_update():
+            for t in threads:
+                t.join()
+            self.progress.stop()
+            self.scan_btn.config(state='normal')
+            
+            # Display results
+            self.results_text.insert(tk.END, "Device,Status,ResponseTime_ms,Timestamp\n")
+            while not self.results_queue.empty():
+                line = self.results_queue.get()
+                self.results_text.insert(tk.END, line)
+            self.results_text.insert(tk.END, f"\nScan complete: {len(self.devices)} devices checked.")
+        
+        threading.Thread(target=wait_and_update).start()
+    
+    def export_csv(self):
+        if self.results_text.get(1.0, tk.END).strip() == "":
+            messagebox.showwarning("No Data", "Run a scan first!")
+            return
+        
+        filename = 'ping_results.csv'
+        with open(filename, 'a', newline='') as f:
+            writer = csv.writer(f)
+            # Write header if file is new/empty
+            if os.stat(filename).st_size == 0:
+                writer.writerow(['Device', 'Status', 'ResponseTime_ms', 'Timestamp'])
+            # Parse and write results
+            content = self.results_text.get(1.0, tk.END).split('\n')[1:]  # Skip header
+            for line in content:
+                if line.strip():
+                    writer.writerow(line.split(','))
+        messagebox.showinfo("Exported", f"Results appended to {filename}")
 
-# Export to CSV with error handling (appends for history; change to -Force for overwrite)
-$csvPath = "ping_results.csv"
-try {
-    $results | Export-Csv -Path $csvPath -NoTypeInformation -Append
-    Write-Host "CSV exported successfully to $csvPath (rows: $($results.Count))"
-} catch {
-    Write-Error "Export failed: $($_.Exception.Message). Data in console below."
-}
-
-# Display summary in console
-Write-Host "Scan complete! Checked $($devices.Count) devices."
-$results | Format-Table -AutoSize
+if __name__ == "__main__":
+    import tkinter.simpledialog  # For add_device dialog
+    root = tk.Tk()
+    app = PingMonitor(root)
+    root.mainloop()
