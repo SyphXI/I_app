@@ -1,0 +1,15 @@
+Screenshot Functionality Altered in Crestron TSS-770 Firmware 3.0 Due to Android OS Upgrade
+The ability to capture screenshots on the Crestron TSS-770 touch screen has been impacted by the recent firmware 3.0 update, primarily due to a significant underlying change in the device's operating system. The new firmware is built upon Android 12, a major leap from previous versions that were based on Android 8 and 10. This transition to a more modern operating system has introduced enhanced security and privacy measures that affect screen capture capabilities.
+
+Historically, the Crestron TSS-770 has not featured a built-in, user-accessible screenshot function. Instead, technicians and integrators have relied on technical workarounds to capture screen content for diagnostics, programming, and documentation purposes. However, the heightened security protocols within Android 12 now appear to restrict these legacy methods.
+
+The primary reason for this change is Android 12's increased focus on preventing unauthorized screen content access. This is a system-level security enhancement designed to protect sensitive information displayed on the screen from being surreptitiously captured by applications. As the TSS-770's operating system now inherits these restrictions, the previously available workarounds may no longer be effective.
+
+Common Workarounds and Their Status with Firmware 3.0:
+Two main methods have been traditionally used to take screenshots on Crestron touch panels:
+
+Console Command: A "screenshot" command could be issued through the Crestron Toolbox software, which would save an image of the current screen to the device's logs. The viability of this command on firmware 3.0 is unconfirmed, and it is likely that the new Android security policies prevent it from executing successfully.
+
+XPanel: Another common technique involved running the touch panel's user interface as an "XPanel" on a desktop or laptop computer. This would mirror the TSS-770's display on the computer, allowing the user to then employ their computer's native screen capture tools. While XPanel functionality itself may still be present in firmware 3.0, the ability to mirror the exact UI for the purpose of a screenshot may be affected by the same underlying OS restrictions.
+
+At present, there are no officially documented methods from Crestron to capture screenshots on the TSS-770 with firmware 3.0. Users and technicians who have upgraded to this latest version should be aware that the previous informal methods may no longer be an option due to the fundamental changes in the Android operating system. It is recommended to consult Crestron's official documentation or support channels for any potential future updates or alternative methods.
