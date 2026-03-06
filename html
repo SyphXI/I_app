@@ -1,434 +1,510 @@
-```python
-# screenshot_tool.py
-#
-# A command-line tool to automate taking screenshots from multiple devices,
-# saving them into a timestamped folder, and generating an HTML gallery for easy viewing.
-# This script is designed to be run from the command line and uses a config.ini
-# file for settings, similar to the AppSpace Device Manager.
-# Updated with: parallel processing, reduced timeouts, CLI args, and enhanced selection.
+#!/usr/bin/env python3
+"""
+Appspace API Python Tool
+========================
+A command-line tool to interact with the Appspace API v3.
 
-import os
-import pandas as pd
-import paramiko
-import configparser
-import logging
-from pathlib import Path
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+Usage:
+    python appspace_tool.py --url <appspace_url> --subject-id <id> --refresh-token <token> <command>
+
+Commands:
+    auth            Get a new access token
+    channels        List all channels
+    channel-get     Get a specific channel by ID
+    channel-create  Create a new channel
+    users           List all users
+    user-get        Get a specific user by ID
+    devices         List all devices
+    device-get      Get a specific device by ID
+    library         List library contents
+    spaces          List space reservations
+    feeds           List feeds
+
+Requirements:
+    pip install requests
+
+"""
+
 import argparse
+import json
+import sys
+import os
 import time
+from datetime import datetime
 
-# Optional: For progress bar (install via pip if needed)
 try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
+    import requests
 except ImportError:
-    TQDM_AVAILABLE = False
-    def tqdm(iterable, desc):  # Fallback
-        return iterable
+    print("ERROR: 'requests' library not found. Install it with: pip install requests")
+    sys.exit(1)
 
-# --- 1. Setup Logging ---
-# Configure logging to provide clear, informative output to the console.
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
-# --- 2. Configuration Management ---
-def load_config():
-    """
-    Loads configuration from 'config.ini' or creates a default one if it doesn't exist.
-    This is crucial for storing SSH credentials and file paths securely.
-    """
-    config = configparser.ConfigParser()
-    config_file = 'config.ini'
-    if not os.path.exists(config_file):
-        logger.warning(f"'{config_file}' not found. Creating a default config file.")
-        config['SSH'] = {
-            'username': 'admin',
-            'password': 'YourDevicePassword', # IMPORTANT: Change this!
-            'timeout': '15',  # Reduced from 30 for faster failure detection
-            'max_workers': '5'  # For parallel processing
+# ─────────────────────────────────────────────
+# Appspace API Client
+# ─────────────────────────────────────────────
+
+class AppspaceClient:
+    def __init__(self, base_url: str, subject_id: str = None, refresh_token: str = None, api_key: str = None):
+        self.base_url = base_url.rstrip("/")
+        self.subject_id = subject_id
+        self.refresh_token = refresh_token
+        self.api_key = api_key
+        self.access_token = None
+        self.token_expires_at = 0
+
+    # ── Authentication ──────────────────────────────────────────────────
+
+    def get_access_token(self) -> str:
+        """Fetch a fresh access token using subject_id + refresh_token."""
+        url = f"{self.base_url}/api/v3/authorization/token"
+        payload = {
+            "subjectType": "Application",
+            "subjectId": self.subject_id,
+            "grantType": "refreshToken",
+            "refreshToken": self.refresh_token,
         }
-        config['PATHS'] = {
-            'csv_file': 'Device Directory.csv',
-            'output_directory': 'screenshots'
-        }
-        with open(config_file, 'w') as f:
-            config.write(f)
-        logger.info(f"Default '{config_file}' created. Please edit it with your device password and paths.")
-    else:
-        config.read(config_file)
-    return config
+        resp = requests.post(url, json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        self.access_token = data["accessToken"]
+        self.refresh_token = data.get("refreshToken", self.refresh_token)
+        # expiresIn is in seconds; store absolute expiry time
+        expires_in = int(data.get("expiresIn", 3600))
+        self.token_expires_at = time.time() + expires_in - 60  # 60s buffer
+        return self.access_token
 
-# --- 3. Device Data Handling ---
-def load_device_data(csv_file_path):
-    """
-    Reads the device information from the specified CSV file using pandas.
-    The CSV should contain 'Device Name' and 'Device IP' columns.
-    Returns a list of device dictionaries.
-    """
-    try:
-        df = pd.read_csv(csv_file_path)
-        # Ensure required columns exist
-        if 'Device Name' not in df.columns or 'Device IP' not in df.columns:
-            logger.error("CSV file must contain 'Device Name' and 'Device IP' columns.")
-            return []
-        # Drop rows where Device Name or Device IP is missing
-        df.dropna(subset=['Device Name', 'Device IP'], inplace=True)
-        # Sort by device name for consistent ordering
-        df_sorted = df.sort_values(by='Device Name').reset_index(drop=True)
-        devices = df_sorted[['Device Name', 'Device IP']].to_dict('records')
-        logger.info(f"Successfully loaded {len(devices)} devices from '{csv_file_path}'.")
-        return devices
-    except FileNotFoundError:
-        logger.error(f"Error: The device CSV file was not found at '{csv_file_path}'.")
-        logger.error("Please ensure the 'csv_file' path in 'config.ini' is correct.")
-        return []
-    except Exception as e:
-        logger.error(f"An error occurred while reading the CSV file: {e}")
-        return []
+    def _ensure_token(self):
+        """Auto-refresh token if expired or missing."""
+        if self.api_key:
+            return  # API key mode — no token needed
+        if not self.access_token or time.time() >= self.token_expires_at:
+            self.get_access_token()
 
-# --- 4. Core SSH and Screenshot Logic ---
-def take_screenshot_and_save(device_name, ip_address, output_dir, ssh_config):
-    """
-    Connects to a device via SSH, takes a screenshot, and downloads it.
-    This is the core function for interacting with each device.
-    """
-    local_filename = f"{device_name.replace(' ', '_').replace('/', '_')}.png"
-    local_filepath = output_dir / local_filename
-    
-    logger.info(f"[{device_name}] Attempting to connect to {ip_address}...")
+    def _headers(self) -> dict:
+        self._ensure_token()
+        if self.api_key:
+            return {"Content-Type": "application/json", "X-API-Key": self.api_key}
+        return {"Content-Type": "application/json", "Authorization": f"Bearer {self.access_token}"}
 
-    try:
-        # Establish SSH connection
-        with paramiko.SSHClient() as ssh_client:
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_client.connect(
-                hostname=ip_address,
-                username=ssh_config['username'],
-                password=ssh_config['password'],
-                timeout=int(ssh_config['timeout'])
-            )
-            logger.info(f"[{device_name}] SSH connection successful.")
-            
-            # Execute screenshot command
-            logger.info(f"[{device_name}] Executing screenshot command...")
-            stdin, stdout, stderr = ssh_client.exec_command('screenshot')
-            # Wait for the command to complete
-            stdout.channel.recv_exit_status() 
-            logger.info(f"[{device_name}] Screenshot command executed.")
-            
-            # Transfer the screenshot file via SFTP
-            remote_paths_to_try = ['/logs/ScreenShot.png', '/logs/ScreenShot.bmp']
-            downloaded = False
-            remote_path_downloaded = None
-            with ssh_client.open_sftp() as sftp:
-                for remote_path in remote_paths_to_try:
-                    try:
-                        logger.info(f"[{device_name}] Trying to download '{remote_path}'...")
-                        sftp.get(remote_path, str(local_filepath))
-                        logger.info(f"[{device_name}] Successfully downloaded screenshot to '{local_filepath}'.")
-                        downloaded = True
-                        remote_path_downloaded = remote_path
-                        break # Exit loop once a file is found and downloaded
-                    except FileNotFoundError:
-                        logger.warning(f"[{device_name}] Remote file not found at '{remote_path}'.")
-                        continue
-            
-            if downloaded and remote_path_downloaded:
-                # Clean up remote file after download
-                try:
-                    sftp.remove(remote_path_downloaded)
-                    logger.info(f"[{device_name}] Cleaned up remote file '{remote_path_downloaded}'.")
-                except Exception as cleanup_e:
-                    logger.warning(f"[{device_name}] Failed to clean up remote file: {cleanup_e}")
-            
-            if not downloaded:
-                logger.error(f"[{device_name}] Failed to find screenshot file on the device.")
-                return None
+    def _get(self, path: str, params: dict = None) -> dict:
+        url = f"{self.base_url}/api/v3/{path.lstrip('/')}"
+        resp = requests.get(url, headers=self._headers(), params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
 
-        return local_filename
+    def _post(self, path: str, payload: dict) -> dict:
+        url = f"{self.base_url}/api/v3/{path.lstrip('/')}"
+        resp = requests.post(url, headers=self._headers(), json=payload, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
 
-    except paramiko.AuthenticationException:
-        logger.error(f"[{device_name}] Authentication failed. Check username/password in 'config.ini'.")
-        return None
-    except paramiko.SSHException as e:
-        logger.error(f"[{device_name}] SSH connection error: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"[{device_name}] An unexpected error occurred: {e}")
-        return None
+    def _put(self, path: str, payload: dict) -> dict:
+        url = f"{self.base_url}/api/v3/{path.lstrip('/')}"
+        resp = requests.put(url, headers=self._headers(), json=payload, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
 
-# --- 5. Excel and HTML Generation ---
-def generate_status_excelsheets(output_dir, selected_devices, failed_devices):
-    """
-    Generates two Excel files: one for online (successful) devices and one for offline (failed) devices.
-    """
-    logger.info("Generating device status Excel sheets...")
+    def _delete(self, path: str) -> dict:
+        url = f"{self.base_url}/api/v3/{path.lstrip('/')}"
+        resp = requests.delete(url, headers=self._headers(), timeout=15)
+        resp.raise_for_status()
+        return resp.json() if resp.content else {"status": "deleted"}
 
-    failed_set = set(failed_devices)
-    online_devices_data = []
-    offline_devices_data = []
+    # ── Channels ────────────────────────────────────────────────────────
 
-    for device in selected_devices:
-        if device['Device Name'] in failed_set:
-            offline_devices_data.append(device)
-        else:
-            online_devices_data.append(device)
+    def list_channels(self, limit: int = 20, offset: int = 0) -> dict:
+        """List channels in the channel directory."""
+        return self._get("channelDirectory", params={"limit": limit, "offset": offset})
 
-    # Create Online Devices Excel if there are any
-    if online_devices_data:
-        online_df = pd.DataFrame(online_devices_data)
-        online_filepath = output_dir / 'online_devices.xlsx'
-        online_df.to_excel(online_filepath, index=False, engine='openpyxl')
-        logger.info(f"Saved online devices list to '{online_filepath}'.")
+    def get_channel(self, channel_id: str) -> dict:
+        """Get a specific channel by ID."""
+        return self._get(f"channelDirectory/{channel_id}")
 
-    # Create Offline Devices Excel if there are any
-    if offline_devices_data:
-        offline_df = pd.DataFrame(offline_devices_data)
-        offline_filepath = output_dir / 'offline_devices.xlsx'
-        offline_df.to_excel(offline_filepath, index=False, engine='openpyxl')
-        logger.info(f"Saved offline devices list to '{offline_filepath}'.")
+    def create_channel(self, name: str, channel_type: str = "playlist", network_id: str = None) -> dict:
+        """Create a new channel."""
+        payload = {"name": name, "type": channel_type}
+        if network_id:
+            payload["networkId"] = network_id
+        return self._post("channels", payload)
 
-def generate_html_gallery(output_dir, selected_devices, failed_devices):
-    """
-    Generates an 'index.html' file to display captured screenshots and indicate failed connections.
-    """
-    if not selected_devices:
-        logger.warning("No devices were selected, so no HTML gallery will be generated.")
+    def publish_channel(self, channel_id: str, device_ids: list = None, user_ids: list = None) -> dict:
+        """Publish a channel to devices or users."""
+        payload = {}
+        if device_ids:
+            payload["deviceIds"] = device_ids
+        if user_ids:
+            payload["userIds"] = user_ids
+        return self._post(f"channels/{channel_id}/publish", payload)
+
+    # ── Users ───────────────────────────────────────────────────────────
+
+    def list_users(self, limit: int = 20, offset: int = 0) -> dict:
+        """List users in the account."""
+        return self._get("users", params={"limit": limit, "offset": offset})
+
+    def get_user(self, user_id: str) -> dict:
+        """Get a specific user by ID."""
+        return self._get(f"users/{user_id}")
+
+    def invite_user(self, email: str, role: str = "viewer") -> dict:
+        """Invite a new user by email."""
+        return self._post("users/invite", {"email": email, "role": role})
+
+    # ── Devices ─────────────────────────────────────────────────────────
+
+    def list_devices(self, limit: int = 20, offset: int = 0) -> dict:
+        """List registered devices."""
+        return self._get("devices", params={"limit": limit, "offset": offset})
+
+    def get_device(self, device_id: str) -> dict:
+        """Get a specific device by ID."""
+        return self._get(f"devices/{device_id}")
+
+    def assign_channel_to_device(self, device_id: str, channel_id: str) -> dict:
+        """Assign a channel to a device."""
+        return self._put(f"devices/{device_id}/channel", {"channelId": channel_id})
+
+    # ── Library ─────────────────────────────────────────────────────────
+
+    def list_library(self, limit: int = 20, offset: int = 0) -> dict:
+        """List library contents."""
+        return self._get("library/contents", params={"limit": limit, "offset": offset})
+
+    def get_library_item(self, item_id: str) -> dict:
+        """Get a specific library item."""
+        return self._get(f"library/contents/{item_id}")
+
+    # ── Spaces (Space Reservation) ───────────────────────────────────────
+
+    def list_spaces(self, limit: int = 20) -> dict:
+        """List available spaces/rooms."""
+        return self._get("spaces", params={"limit": limit})
+
+    def list_bookings(self, space_id: str = None) -> dict:
+        """List space bookings, optionally filtered by space ID."""
+        path = f"spaces/{space_id}/bookings" if space_id else "bookings"
+        return self._get(path)
+
+    # ── Feeds ────────────────────────────────────────────────────────────
+
+    def list_feeds(self, limit: int = 20) -> dict:
+        """List data feeds."""
+        return self._get("feeds", params={"limit": limit})
+
+    def get_feed(self, feed_id: str) -> dict:
+        """Get a specific feed by ID."""
+        return self._get(f"feeds/{feed_id}")
+
+    # ── Networks ─────────────────────────────────────────────────────────
+
+    def list_networks(self) -> dict:
+        """List networks in the account."""
+        return self._get("networks")
+
+
+# ─────────────────────────────────────────────
+# Pretty Printer
+# ─────────────────────────────────────────────
+
+def pretty(data: dict):
+    print(json.dumps(data, indent=2))
+
+
+def print_table(items: list, fields: list):
+    """Simple tabular output for lists."""
+    if not items:
+        print("  (no results)")
         return
+    # Calculate column widths
+    widths = {f: len(f) for f in fields}
+    for item in items:
+        for f in fields:
+            val = str(item.get(f, ""))
+            widths[f] = max(widths[f], min(len(val), 50))
+    # Header
+    header = "  ".join(f.upper().ljust(widths[f]) for f in fields)
+    print(header)
+    print("-" * len(header))
+    # Rows
+    for item in items:
+        row = "  ".join(str(item.get(f, "")).ljust(widths[f])[:widths[f]] for f in fields)
+        print(row)
 
-    logger.info("Generating HTML gallery...")
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Device Screenshots</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 0; background-color: #f4f4f9; }
-            header { background-color: #4a6da7; color: white; padding: 1rem; text-align: center; }
-            h1 { margin: 0; }
-            .gallery { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; padding: 20px; }
-            .card { background-color: white; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); overflow: hidden; width: 400px; }
-            .card.failed { background-color: #ffebee; border: 1px solid #e57373; }
-            .card h2 { font-size: 1rem; padding: 10px; margin: 0; background-color: #f1f1f1; text-align: center; color: #333; }
-            .card img { max-width: 100%; height: auto; display: block; }
-            .status-text { padding: 40px 20px; text-align: center; font-size: 1.2rem; color: #c62828; font-weight: bold; }
-            .download-links { margin-top: 1rem; }
-            .download-links a {
-                background-color: #ffffff;
-                color: #4a6da7;
-                padding: 8px 15px;
-                text-decoration: none;
-                border-radius: 5px;
-                font-weight: bold;
-                margin: 0 10px;
-                transition: background-color 0.3s, color 0.3s;
-                border: 1px solid #4a6da7;
-            }
-            .download-links a:hover {
-                background-color: #4a6da7;
-                color: #ffffff;
-            }
-        </style>
-    </head>
-    <body>
-        <header>
-            <h1>Device Screenshot Gallery</h1>
-            <p>Generated on: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
-            <div class="download-links">
-    """
-    # Conditionally add download links if the files exist
-    if os.path.exists(output_dir / 'online_devices.xlsx'):
-        html_content += '<a href="online_devices.xlsx" download>Download Online Devices List</a>'
-    if os.path.exists(output_dir / 'offline_devices.xlsx'):
-        html_content += '<a href="offline_devices.xlsx" download>Download Offline Devices List</a>'
 
-    html_content += """
-            </div>
-        </header>
-        <div class="gallery">
-    """
+# ─────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────
 
-    # Create a set of failed device names for efficient lookup
-    failed_set = set(failed_devices)
-    
-    # Sort devices by name for a consistent order in the gallery
-    sorted_devices = sorted(selected_devices, key=lambda d: d['Device Name'])
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Appspace API v3 Python Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+EXAMPLES:
+  # Authenticate and get a token
+  python appspace_tool.py --url https://app9.cloud.appspace.com \\
+      --subject-id YOUR_SUBJECT_ID --refresh-token YOUR_REFRESH_TOKEN auth
 
-    for device in sorted_devices:
-        device_name = device['Device Name']
-        
-        if device_name in failed_set:
-            # Create a card for a failed device
-            html_content += f"""
-            <div class="card failed">
-                <h2>{device_name}</h2>
-                <div class="status-text">Connection Failed</div>
-            </div>
-            """
-        else:
-            # Create a card for a successful device
-            # Sanitize device name to match the filename format
-            filename = f"{device_name.replace(' ', '_').replace('/', '_')}.png"
-            html_content += f"""
-            <div class="card">
-                <h2>{device_name}</h2>
-                <img src="{filename}" alt="Screenshot of {device_name}">
-            </div>
-            """
+  # List channels (table view)
+  python appspace_tool.py [auth args] channels
 
-    html_content += """
-        </div>
-    </body>
-    </html>
-    """
+  # List channels (raw JSON)
+  python appspace_tool.py [auth args] channels --json
 
-    html_filepath = output_dir / 'index.html'
-    with open(html_filepath, 'w') as f:
-        f.write(html_content)
-    logger.info(f"HTML gallery saved to '{html_filepath}'.")
+  # Get a specific channel
+  python appspace_tool.py [auth args] channel-get --id CHANNEL_ID
 
-# --- 6. Main Execution Flow ---
-def parse_selection(selection_str, total_items):
-    """Parses a user input string like '1,3,5-7' into a list of valid indices."""
-    indices = set()
+  # Create a channel
+  python appspace_tool.py [auth args] channel-create --name "My Channel"
+
+  # List users
+  python appspace_tool.py [auth args] users
+
+  # List devices
+  python appspace_tool.py [auth args] devices
+
+  # Assign a channel to a device
+  python appspace_tool.py [auth args] device-assign --device-id DEV_ID --channel-id CH_ID
+
+  # List library contents
+  python appspace_tool.py [auth args] library
+
+  # List available spaces
+  python appspace_tool.py [auth args] spaces
+        """
+    )
+
+    # Connection args
+    conn = parser.add_argument_group("Connection")
+    conn.add_argument("--url", required=True, help="Appspace base URL, e.g. https://app9.cloud.appspace.com")
+    auth_group = conn.add_mutually_exclusive_group()
+    auth_group.add_argument("--subject-id", help="Application integration subject ID (use with --refresh-token)")
+    conn.add_argument("--refresh-token", help="Refresh token for the application integration")
+    auth_group.add_argument("--api-key", help="API key (alternative to subject-id + refresh-token)")
+
+    # Output
+    parser.add_argument("--json", action="store_true", help="Output raw JSON instead of table")
+    parser.add_argument("--limit", type=int, default=20, help="Max results to return (default: 20)")
+    parser.add_argument("--offset", type=int, default=0, help="Results offset for pagination (default: 0)")
+
+    # Commands
+    subs = parser.add_subparsers(dest="command", title="Commands")
+    subs.required = True
+
+    # auth
+    subs.add_parser("auth", help="Fetch and display a new access token")
+
+    # channels
+    subs.add_parser("channels", help="List all channels")
+
+    ch_get = subs.add_parser("channel-get", help="Get a channel by ID")
+    ch_get.add_argument("--id", required=True, help="Channel ID")
+
+    ch_create = subs.add_parser("channel-create", help="Create a new channel")
+    ch_create.add_argument("--name", required=True, help="Channel name")
+    ch_create.add_argument("--type", default="playlist", choices=["playlist", "live", "advanced"], help="Channel type")
+    ch_create.add_argument("--network-id", help="Network ID to assign channel to")
+
+    ch_pub = subs.add_parser("channel-publish", help="Publish a channel to devices/users")
+    ch_pub.add_argument("--id", required=True, help="Channel ID")
+    ch_pub.add_argument("--device-ids", nargs="+", help="Device IDs to publish to")
+    ch_pub.add_argument("--user-ids", nargs="+", help="User IDs to publish to")
+
+    # users
+    subs.add_parser("users", help="List users")
+
+    u_get = subs.add_parser("user-get", help="Get a user by ID")
+    u_get.add_argument("--id", required=True, help="User ID")
+
+    u_invite = subs.add_parser("user-invite", help="Invite a user by email")
+    u_invite.add_argument("--email", required=True, help="User email address")
+    u_invite.add_argument("--role", default="viewer", help="User role (default: viewer)")
+
+    # devices
+    subs.add_parser("devices", help="List registered devices")
+
+    d_get = subs.add_parser("device-get", help="Get a device by ID")
+    d_get.add_argument("--id", required=True, help="Device ID")
+
+    d_assign = subs.add_parser("device-assign", help="Assign a channel to a device")
+    d_assign.add_argument("--device-id", required=True, help="Device ID")
+    d_assign.add_argument("--channel-id", required=True, help="Channel ID to assign")
+
+    # library
+    subs.add_parser("library", help="List library contents")
+
+    lib_get = subs.add_parser("library-get", help="Get a library item by ID")
+    lib_get.add_argument("--id", required=True, help="Library item ID")
+
+    # spaces
+    subs.add_parser("spaces", help="List spaces/rooms")
+
+    bookings = subs.add_parser("bookings", help="List bookings")
+    bookings.add_argument("--space-id", help="Filter by space ID")
+
+    # feeds
+    subs.add_parser("feeds", help="List data feeds")
+
+    f_get = subs.add_parser("feed-get", help="Get a feed by ID")
+    f_get.add_argument("--id", required=True, help="Feed ID")
+
+    # networks
+    subs.add_parser("networks", help="List networks")
+
+    return parser
+
+
+def run(args):
+    # Validate auth args
+    if not args.api_key and (not args.subject_id or not args.refresh_token):
+        print("ERROR: Provide either --api-key OR both --subject-id and --refresh-token")
+        sys.exit(1)
+
+    client = AppspaceClient(
+        base_url=args.url,
+        subject_id=getattr(args, "subject_id", None),
+        refresh_token=getattr(args, "refresh_token", None),
+        api_key=getattr(args, "api_key", None),
+    )
+
+    cmd = args.command
+
     try:
-        # Split by comma for individual numbers or ranges
-        parts = selection_str.split(',')
-        for part in parts:
-            part = part.strip()
-            if '-' in part:
-                # Handle ranges like '5-10'
-                start, end = map(int, part.split('-'))
-                # A little sanity check to allow '10-5' as well
-                if start > end:
-                    start, end = end, start
-                for i in range(start, end + 1):
-                    # Check if the number is within the valid range of devices
-                    if 1 <= i <= total_items:
-                        indices.add(i - 1) # Convert to 0-based index
-            elif part: # Handle individual numbers
-                i = int(part)
-                if 1 <= i <= total_items:
-                    indices.add(i - 1) # Convert to 0-based index
-    except ValueError:
-        logger.error(f"Invalid format in selection: '{selection_str}'. Please use numbers, commas, and hyphens.")
-        return None # Return None to indicate an error
-    return sorted(list(indices))
-
-def main():
-    """
-    The main function that orchestrates the entire script's execution.
-    """
-    parser = argparse.ArgumentParser(description="Multi-Device Screenshot Tool")
-    parser.add_argument('--devices', default=None, help="Device selection (e.g., '1,3' or 'all'). If not provided, prompts interactively.")
-    parser.add_argument('--output', default=None, help="Custom output directory base (overrides config.ini).")
-    args = parser.parse_args()
-
-    logger.info("--- Starting Multi-Device Screenshot Tool ---")
-    
-    # Load configuration
-    config = load_config()
-    ssh_config = config['SSH']
-    paths_config = config['PATHS']
-
-    # Create a timestamped output directory
-    base_output_dir = Path(args.output or paths_config.get('output_directory', 'screenshots'))
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    output_dir = base_output_dir / f"screenshots_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Output will be saved in: {output_dir}")
-    
-    # Load device data
-    devices = load_device_data(paths_config['csv_file'])
-    if not devices:
-        logger.error("Exiting due to failure to load device data.")
-        return
-
-    # Prompt user to select devices (or use CLI arg)
-    selected_devices = []
-    if args.devices:
-        user_input = args.devices.strip()
-    else:
-        print("\nAvailable Devices:")
-        for i, device in enumerate(devices):
-            print(f"  {i+1}: {device['Device Name']} ({device['Device IP']})")
-        
-        print("\nEnter device numbers (e.g., 1,3,5 or 45-55).")
-        print("Or type 'all' to select all devices.")
-        
-        user_input = input("> ").strip()
-
-    if user_input.lower() == 'all':
-        selected_devices = devices
-    else:
-        # Use the parsing function to handle ranges and single numbers
-        indices = parse_selection(user_input, len(devices))
-        
-        # If parsing returns None, it means there was an error
-        if indices is None:
+        # ── AUTH ──
+        if cmd == "auth":
+            token = client.get_access_token()
+            exp = datetime.fromtimestamp(client.token_expires_at + 60).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"✅ Token obtained successfully (expires ~{exp})")
+            if args.json:
+                print(json.dumps({"accessToken": token, "expiresAt": exp}, indent=2))
             return
 
-        for i in indices:
-            selected_devices.append(devices[i])
+        # ── CHANNELS ──
+        elif cmd == "channels":
+            data = client.list_channels(args.limit, args.offset)
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n📺 Channels ({len(items)} results)\n")
+                print_table(items, ["id", "name", "type", "status"])
 
-    if not selected_devices:
-        logger.warning("No valid devices selected. Exiting.")
-        return
+        elif cmd == "channel-get":
+            pretty(client.get_channel(args.id))
 
-    logger.info(f"Starting screenshot process for {len(selected_devices)} selected device(s)...")
-    
-    max_workers = int(ssh_config.get('max_workers', '5'))
-    successful_screenshots = []
-    failed_devices = []
+        elif cmd == "channel-create":
+            result = client.create_channel(args.name, args.type, getattr(args, "network_id", None))
+            print(f"✅ Channel created:")
+            pretty(result)
 
-    # Parallel processing loop
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_device = {
-            executor.submit(take_screenshot_and_save, device['Device Name'], device['Device IP'], output_dir, ssh_config): device
-            for device in selected_devices
-        }
-        
-        # Collect results as they complete (with optional progress)
-        progress_iter = tqdm(as_completed(future_to_device), total=len(selected_devices), desc="Processing devices") if TQDM_AVAILABLE else as_completed(future_to_device)
-        for future in progress_iter:
-            device = future_to_device[future]
-            device_name = device['Device Name']
-            try:
-                filename = future.result()
-                if filename:
-                    successful_screenshots.append(filename)
-                    logger.info(f"[{device_name}] Completed successfully.")
-                else:
-                    failed_devices.append(device_name)
-                    logger.warning(f"[{device_name}] Failed.")
-            except Exception as e:
-                failed_devices.append(device_name)
-                logger.error(f"[{device_name}] Thread error: {e}")
-    
-    logger.info(f"Processed {len(selected_devices)} devices in parallel with {max_workers} workers.")
-    
-    # Generate the Excel sheets with online/offline status
-    generate_status_excelsheets(output_dir, selected_devices, failed_devices)
+        elif cmd == "channel-publish":
+            result = client.publish_channel(args.id, getattr(args, "device_ids", None), getattr(args, "user_ids", None))
+            print(f"✅ Published:")
+            pretty(result)
 
-    # Generate the HTML gallery with results for all selected devices
-    generate_html_gallery(output_dir, selected_devices, failed_devices)
-    
-    # Final summary
-    logger.info("--- Screenshot Process Complete ---")
-    logger.info(f"Successfully captured: {len(successful_screenshots)} screenshot(s).")
-    if failed_devices:
-        logger.warning(f"Failed to capture for: {len(failed_devices)} device(s): {', '.join(failed_devices)}")
-    logger.info(f"All files are located in: {output_dir}")
-    logger.info("You can now share this folder or open the 'index.html' file to view the gallery.")
+        # ── USERS ──
+        elif cmd == "users":
+            data = client.list_users(args.limit, args.offset)
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n👥 Users ({len(items)} results)\n")
+                print_table(items, ["id", "email", "firstName", "lastName", "role"])
+
+        elif cmd == "user-get":
+            pretty(client.get_user(args.id))
+
+        elif cmd == "user-invite":
+            result = client.invite_user(args.email, args.role)
+            print(f"✅ Invite sent:")
+            pretty(result)
+
+        # ── DEVICES ──
+        elif cmd == "devices":
+            data = client.list_devices(args.limit, args.offset)
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n📱 Devices ({len(items)} results)\n")
+                print_table(items, ["id", "name", "type", "status", "networkId"])
+
+        elif cmd == "device-get":
+            pretty(client.get_device(args.id))
+
+        elif cmd == "device-assign":
+            result = client.assign_channel_to_device(args.device_id, args.channel_id)
+            print(f"✅ Channel assigned:")
+            pretty(result)
+
+        # ── LIBRARY ──
+        elif cmd == "library":
+            data = client.list_library(args.limit, args.offset)
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n📁 Library ({len(items)} results)\n")
+                print_table(items, ["id", "name", "type", "size", "createdAt"])
+
+        elif cmd == "library-get":
+            pretty(client.get_library_item(args.id))
+
+        # ── SPACES ──
+        elif cmd == "spaces":
+            data = client.list_spaces(args.limit)
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n🏢 Spaces ({len(items)} results)\n")
+                print_table(items, ["id", "name", "type", "capacity", "networkId"])
+
+        elif cmd == "bookings":
+            data = client.list_bookings(getattr(args, "space_id", None))
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n📅 Bookings ({len(items)} results)\n")
+                print_table(items, ["id", "spaceId", "startTime", "endTime", "organizer"])
+
+        # ── FEEDS ──
+        elif cmd == "feeds":
+            data = client.list_feeds(args.limit)
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n📡 Feeds ({len(items)} results)\n")
+                print_table(items, ["id", "name", "type", "status"])
+
+        elif cmd == "feed-get":
+            pretty(client.get_feed(args.id))
+
+        # ── NETWORKS ──
+        elif cmd == "networks":
+            data = client.list_networks()
+            if args.json:
+                pretty(data)
+            else:
+                items = data.get("data", data if isinstance(data, list) else [])
+                print(f"\n🌐 Networks ({len(items)} results)\n")
+                print_table(items, ["id", "name", "parentId"])
+
+    except requests.exceptions.HTTPError as e:
+        print(f"\n❌ HTTP Error {e.response.status_code}: {e.response.text}")
+        sys.exit(1)
+    except requests.exceptions.ConnectionError:
+        print(f"\n❌ Connection error — check your --url: {args.url}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
-```
+    parser = build_parser()
+    args = parser.parse_args()
+    run(args)
